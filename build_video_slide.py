@@ -26,8 +26,8 @@ VIDEO_ASSETS = ASSETS / "video_sources"
 
 SLIDE_W, SLIDE_H = 1080, 1350
 MEDIA_X, MEDIA_Y, MEDIA_W, MEDIA_H = 110, 300, 860, 760
-POST_VIDEO_MEDIA_X, POST_VIDEO_MEDIA_Y = 260, 624
-POST_VIDEO_MEDIA_W, POST_VIDEO_MEDIA_H = 560, 560
+POST_VIDEO_MEDIA_X, POST_VIDEO_MEDIA_Y = 75, 600
+POST_VIDEO_MEDIA_W, POST_VIDEO_MEDIA_H = 930, 523
 
 
 def is_url(value: str) -> bool:
@@ -315,12 +315,12 @@ def media_box(layout: str) -> tuple[int, int, int, int]:
 
 def post_text_size(text: str) -> int:
     if len(text) > 260:
-        return 21
-    if len(text) > 190:
         return 23
+    if len(text) > 190:
+        return 25
     if len(text) > 120:
-        return 24
-    return 27
+        return 27
+    return 30
 
 
 def frame_html(
@@ -344,6 +344,11 @@ def frame_html(
     media_shell_h = media_h + 36
     is_post_video = layout == "post-video"
     kicker_top = 154 if is_post_video else 176
+    kicker_markup = "" if is_post_video else f'<div class="kicker"><em>{safe_kicker}</em></div>'
+    post_card_top = 146
+    post_card_x = media_x
+    post_card_w = media_w
+    post_card_h = 386
     source_label_top = 1100
     caption_top = 1140
     dots_bottom = 62 if is_post_video else 108
@@ -527,11 +532,11 @@ body {{ margin: 0; background: transparent; font-family: 'Archivo', sans-serif; 
 
 .post-card {{
   position: absolute;
-  top: 218px;
-  left: 94px;
-  width: 892px;
-  height: 348px;
-  padding: 24px 34px 20px;
+  top: {post_card_top}px;
+  left: {post_card_x}px;
+  width: {post_card_w}px;
+  height: {post_card_h}px;
+  padding: 26px 36px 22px;
   border-radius: 28px;
   background: #101820;
   color: #E7E9EA;
@@ -542,7 +547,7 @@ body {{ margin: 0; background: transparent; font-family: 'Archivo', sans-serif; 
   display: flex;
   align-items: center;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }}
 .post-avatar {{
   width: 54px;
@@ -595,7 +600,7 @@ body {{ margin: 0; background: transparent; font-family: 'Archivo', sans-serif; 
   line-height: 1.2;
   font-weight: 560;
   white-space: pre-line;
-  max-height: 150px;
+  max-height: 168px;
   overflow: hidden;
 }}
 .post-meta {{
@@ -632,7 +637,7 @@ body {{ margin: 0; background: transparent; font-family: 'Archivo', sans-serif; 
 <div class="slide">
 {handle_markup()}
   <div class="zone top-right"></div>
-  <div class="kicker"><em>{safe_kicker}</em></div>
+  {kicker_markup}
   {post_markup}
   <div class="media-shell"></div>
   <div class="media-slot"></div>

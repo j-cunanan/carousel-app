@@ -447,7 +447,7 @@ def discover_thread_posts(url: str, max_posts: int, cookies_from_browser: str | 
     return posts
 
 
-def capture_embed(status_id: str, out_path: Path, *, width: int = 550) -> Path:
+def capture_embed(status_id: str, out_path: Path, *, width: int = 620) -> Path:
     try:
         from playwright.sync_api import sync_playwright
     except ModuleNotFoundError as exc:
@@ -664,10 +664,10 @@ def render_post_slide(post: dict[str, str], embed_png: Path, out_path: Path, act
 {shared_css()}
 .shot-wrap {{
   position: absolute;
-  top: 284px;
-  left: 88px;
-  width: 904px;
-  height: 880px;
+  top: 148px;
+  left: 40px;
+  width: 1000px;
+  height: 1044px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -682,7 +682,7 @@ def render_post_slide(post: dict[str, str], embed_png: Path, out_path: Path, act
   position: absolute;
   left: 120px;
   right: 120px;
-  bottom: 144px;
+  bottom: 112px;
   text-align: center;
   font-size: 23px;
   font-weight: 800;
@@ -694,7 +694,6 @@ def render_post_slide(post: dict[str, str], embed_png: Path, out_path: Path, act
 <body>
 <div class="slide">
 {handle_markup()}
-  <div class="kicker"><em>The post</em></div>
   <div class="shot-wrap"><img class="tweet-shot" src="{embed_png.resolve().as_uri()}"></div>
   <div class="source-label">{label}</div>
   <div class="dots">{dot_markup(active, count)}</div>
@@ -773,7 +772,7 @@ def build_x_carousel(
                 frame_out=frame_path,
                 poster_out=poster_path,
                 caption="",
-                kicker="The post",
+                kicker="",
                 source_label=post.get("handle", ""),
                 active=idx,
                 count=total,
