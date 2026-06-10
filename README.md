@@ -24,6 +24,23 @@ Use retina PNGs when needed:
 uv run python build.py --scale 2
 ```
 
+## One-URL X Carousel
+
+Drop in one X/Twitter status URL:
+
+```sh
+uv run python build_x_carousel.py "https://x.com/OpenAI/status/2061887650391625870"
+```
+
+The script writes an ordered carousel folder to `out/x_carousel`:
+
+- `slide_01.png`: branded title/hook slide
+- `slide_02.png`: branded post slide for a normal post
+- `slide_02.mp4`: branded post+video slide when the post has video
+- `manifest.json`: ordered slide list and source URLs
+
+By default it tries to detect same-author thread posts from the X page and creates one post/media slide for each detected part. Use `--no-thread` to force a single-post carousel, `--max-thread-posts` to cap a long thread, or `--title` to override the generated title slide.
+
 ## Branded Video Slide
 
 Use a local video:
