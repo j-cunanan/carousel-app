@@ -1,3 +1,4 @@
+.DS_Store
 .venv/
 __pycache__/
 *.pyc
@@ -9,5 +10,5 @@ out/video_*.mp4
 out/video_*.png
 out/post_video_*
 out/x_carousel/
-out/*_x_carousel/
+out/*_x_carousel*/
 out/test_*

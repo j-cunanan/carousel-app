@@ -41,6 +41,19 @@ The script writes an ordered carousel folder to `out/x_carousel`:
 
 By default it tries to detect same-author thread posts from the X page and creates one post/media slide for each detected part. Use `--no-thread` to force a single-post carousel, `--max-thread-posts` to cap a long thread, or `--title` to override the generated title slide.
 
+X sometimes hides thread replies from anonymous browsers. If a URL is part of a thread but only one post is visible, let the workflow use your logged-in browser cookies:
+
+```sh
+uv run python build_x_carousel.py "https://x.com/OpenAI/status/2061887650391625870" \
+  --cookies-from-browser chrome
+```
+
+For automation triggers that should still accept only the URL, set this once in the runtime environment:
+
+```sh
+export X_COOKIES_FROM_BROWSER=chrome
+```
+
 ## Branded Video Slide
 
 Use a local video:

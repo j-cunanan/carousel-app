@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ from build_video_slide import (
 ROOT = Path(__file__).resolve().parent
 FONTS = ROOT / "assets" / "archivo.css"
 DEFAULT_OUT = OUT / "x_carousel"
+
+X_COOKIE_DOMAINS = ("x.com", "twitter.com")
 
 
 def canonical_x_url(value: str) -> str:
@@ -70,6 +73,88 @@ def metadata_has_video(metadata: dict[str, object] | None) -> bool:
         return False
     formats = metadata.get("formats")
     return isinstance(formats, list) and any(fmt.get("vcodec") != "none" for fmt in formats if isinstance(fmt, dict))
+
+
+def parse_browser_cookie_spec(value: str) -> tuple[str, str | None, str | None, str | None]:
+    browser_spec, _, container = value.partition("::")
+    browser_profile, _, profile = browser_spec.partition(":")
+    browser, _, keyring = browser_profile.partition("+")
+    return browser, profile or None, keyring or None, container or None
+
+
+def same_site_for_playwright(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.lower()
+    if normalized == "strict":
+        return "Strict"
+    if normalized == "lax":
+        return "Lax"
+    if normalized == "none":
+        return "None"
+    return None
+
+
+def cookie_domain_is_x(domain: str) -> bool:
+    domain = domain.lstrip(".").lower()
+    return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in X_COOKIE_DOMAINS)
+
+
+def expires_for_playwright(value: int) -> int:
+    if value <= 0:
+        return -1
+    if value > 10_000_000_000:
+        value = int(value / 1_000_000 - 11_644_473_600)
+    return value if value > 0 else -1
+
+
+def load_playwright_cookies(cookies_from_browser: str | None) -> list[dict[str, object]]:
+    if not cookies_from_browser:
+        return []
+    try:
+        from yt_dlp.cookies import extract_cookies_from_browser
+    except ModuleNotFoundError:
+        print("[x] yt-dlp is required to import browser cookies; continuing without them")
+        return []
+
+    browser_name, profile, keyring, container = parse_browser_cookie_spec(cookies_from_browser)
+    try:
+        cookie_jar = extract_cookies_from_browser(
+            browser_name,
+            profile=profile,
+            keyring=keyring,
+            container=container,
+        )
+    except Exception as exc:
+        print(f"[x] could not load browser cookies from {cookies_from_browser}: {exc}")
+        return []
+
+    cookies: list[dict[str, object]] = []
+    for cookie in cookie_jar:
+        if not cookie_domain_is_x(cookie.domain):
+            continue
+        item: dict[str, object] = {
+            "name": cookie.name,
+            "value": cookie.value,
+            "domain": cookie.domain,
+            "path": cookie.path or "/",
+            "secure": bool(cookie.secure),
+            "httpOnly": bool(
+                cookie.has_nonstandard_attr("HttpOnly")
+                or cookie.has_nonstandard_attr("HTTPOnly")
+            ),
+        }
+        if cookie.expires is not None:
+            item["expires"] = expires_for_playwright(int(cookie.expires))
+        same_site = same_site_for_playwright(
+            cookie.get_nonstandard_attr("SameSite")
+            or cookie.get_nonstandard_attr("sameSite")
+        )
+        if same_site:
+            item["sameSite"] = same_site
+        cookies.append(item)
+    print(f"[x] loaded {len(cookies)} X/Twitter cookies from {cookies_from_browser}")
+    return cookies
 
 
 def post_from_metadata(url: str, metadata: dict[str, object] | None) -> dict[str, str]:
@@ -221,17 +306,38 @@ def article_to_post(article: dict[str, object]) -> dict[str, str] | None:
     }
 
 
-def discover_thread_posts(url: str, max_posts: int) -> list[dict[str, str]]:
+def discover_thread_posts(url: str, max_posts: int, cookies_from_browser: str | None) -> list[dict[str, str]]:
     try:
         from playwright.sync_api import sync_playwright
     except ModuleNotFoundError:
         return []
 
     print("[x] looking for thread posts")
+    article_script = """
+    () => Array.from(document.querySelectorAll('article')).map((article, index) => {
+        const timeLink = article.querySelector('time')?.closest('a')?.href || "";
+        const statusLinks = Array.from(article.querySelectorAll('a[href*="/status/"]')).map((a) => a.href);
+        const status = timeLink || statusLinks.find(Boolean) || "";
+        const links = Array.from(article.querySelectorAll('a[href^="/"], a[href^="https://x.com/"], a[href^="https://twitter.com/"]'));
+        const handleLink = links.map((a) => a.textContent || "").find((text) => /^@/.test(text.trim())) || "";
+        const author = Array.from(article.querySelectorAll('a[role="link"] span'))
+          .map((el) => el.textContent || "").find((text) => text && !text.startsWith("@")) || "";
+        const rect = article.getBoundingClientRect();
+        return {
+            url: status,
+            handle: handleLink.trim(),
+            author: author.trim(),
+            text: article.innerText || "",
+            y: Math.round(rect.top + window.scrollY),
+            index,
+        };
+    })
+    """
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page(
+            context = browser.new_context(
                 viewport={"width": 760, "height": 2200},
                 device_scale_factor=1,
                 color_scheme="dark",
@@ -241,46 +347,103 @@ def discover_thread_posts(url: str, max_posts: int) -> list[dict[str, str]]:
                     "Chrome/126.0.0.0 Safari/537.36"
                 ),
             )
+            cookies = load_playwright_cookies(cookies_from_browser)
+            if cookies:
+                try:
+                    context.add_cookies(cookies)
+                except Exception as exc:
+                    print(f"[x] could not add browser cookies to Playwright: {exc}")
+            page = context.new_page()
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_selector("article", timeout=20000)
             page.wait_for_timeout(2500)
             page.keyboard.press("Escape")
             page.wait_for_timeout(500)
-            for _ in range(2):
-                page.mouse.wheel(0, 900)
-                page.wait_for_timeout(800)
-            articles = page.evaluate(
-                """() => Array.from(document.querySelectorAll('article')).map((article) => {
-                    const status = Array.from(article.querySelectorAll('a[href*="/status/"]'))
-                      .map((a) => a.href).find(Boolean) || "";
-                    const links = Array.from(article.querySelectorAll('a[href^="/"], a[href^="https://x.com/"], a[href^="https://twitter.com/"]'));
-                    const handleLink = links.map((a) => a.textContent || "").find((text) => /^@/.test(text.trim())) || "";
-                    const author = Array.from(article.querySelectorAll('a[role="link"] span'))
-                      .map((el) => el.textContent || "").find((text) => text && !text.startsWith("@")) || "";
-                    return { url: status, handle: handleLink.trim(), author: author.trim(), text: article.innerText || "" };
-                })"""
-            )
+            articles: list[dict[str, object]] = []
+            seen_snapshot_ids: set[str] = set()
+
+            def collect_visible_articles() -> int:
+                added = 0
+                for article in page.evaluate(article_script):
+                    status_id = extract_status_id(str(article.get("url") or ""))
+                    if not status_id:
+                        continue
+                    snapshot_key = f"{status_id}:{article.get('y')}:{article.get('index')}"
+                    if snapshot_key in seen_snapshot_ids:
+                        continue
+                    seen_snapshot_ids.add(snapshot_key)
+                    articles.append(article)
+                    added += 1
+                return added
+
+            collect_visible_articles()
+            for selector in ("text=/Show this thread/i", "text=/Show more replies/i", "text=/Read .*repl/i"):
+                try:
+                    page.locator(selector).first.click(timeout=2500)
+                    page.wait_for_timeout(1600)
+                    collect_visible_articles()
+                except Exception:
+                    pass
+
+            stable_rounds = 0
+            max_rounds = max(6, min(18, max_posts * 3))
+            for _ in range(max_rounds):
+                page.mouse.wheel(0, 1200)
+                page.wait_for_timeout(900)
+                added = collect_visible_articles()
+                if added:
+                    stable_rounds = 0
+                else:
+                    stable_rounds += 1
+                if stable_rounds >= 3:
+                    break
             browser.close()
     except Exception:
         return []
 
-    posts: list[dict[str, str]] = []
-    seen: set[str] = set()
-    first_handle = ""
+    unique_posts: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
     for article in articles:
         post = article_to_post(article)
-        if not post or post["id"] in seen:
+        if not post or post["id"] in seen_ids:
             continue
-        if not first_handle and post["handle"]:
-            first_handle = post["handle"]
-        if first_handle and post["handle"] and post["handle"].lower() != first_handle.lower():
-            if posts:
+        seen_ids.add(post["id"])
+        unique_posts.append(post)
+
+    target_id = extract_status_id(url)
+    target_index = next((i for i, post in enumerate(unique_posts) if post["id"] == target_id), -1)
+    if target_index < 0:
+        return unique_posts[:max_posts]
+
+    target = unique_posts[target_index]
+    thread_handle = target.get("handle", "").lower()
+    if not thread_handle:
+        thread_handle = next((post["handle"].lower() for post in unique_posts if post.get("handle")), "")
+
+    start = target_index
+    while start > 0:
+        previous = unique_posts[start - 1]
+        previous_handle = previous.get("handle", "").lower()
+        if thread_handle and previous_handle and previous_handle != thread_handle:
+            break
+        start -= 1
+
+    posts: list[dict[str, str]] = []
+    for post in unique_posts[start:]:
+        post_handle = post.get("handle", "").lower()
+        if thread_handle and post_handle and post_handle != thread_handle:
+            if any(item["id"] == target_id for item in posts):
                 break
             continue
-        seen.add(post["id"])
         posts.append(post)
         if len(posts) >= max_posts:
             break
+
+    if len(posts) <= 1 and not cookies_from_browser:
+        print(
+            "[x] only one public post was visible; if this is a thread, "
+            "try --cookies-from-browser chrome"
+        )
     return posts
 
 
@@ -569,7 +732,7 @@ def build_x_carousel(
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     url = canonical_x_url(url)
-    posts = [] if no_thread else discover_thread_posts(url, max_thread_posts)
+    posts = [] if no_thread else discover_thread_posts(url, max_thread_posts, cookies_from_browser)
     if not posts:
         metadata = fetch_metadata(url, cookies_from_browser)
         embed_post = fetch_embed_post(url) if metadata is None else None
@@ -662,7 +825,14 @@ def main() -> int:
     ap.add_argument("--max-thread-posts", type=int, default=8)
     ap.add_argument("--title", help="Override generated title slide text")
     ap.add_argument("--no-thread", action="store_true", help="Only build from the supplied post")
-    ap.add_argument("--cookies-from-browser", help="Pass through to yt-dlp when X gates media")
+    ap.add_argument(
+        "--cookies-from-browser",
+        default=os.environ.get("X_COOKIES_FROM_BROWSER"),
+        help=(
+            "Use browser cookies for X thread discovery and gated media "
+            "(also configurable with X_COOKIES_FROM_BROWSER)"
+        ),
+    )
     args = ap.parse_args()
 
     if not shutil.which("ffmpeg"):
