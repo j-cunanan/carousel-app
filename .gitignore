@@ -4,8 +4,13 @@ __pycache__/
 
 assets/video_sources/
 out/_video_frame.html
+out/_build_*.html
 out/video_*.json
 out/video_*.mp4
 out/video_*.png
 out/post_video_*
 out/test_*
+out/deepfake_03.mp4
+out/deepfake_03.json
+out/deepfake_03_poster.png
+out/deepfake_frame_03.png

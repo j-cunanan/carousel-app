@@ -10,7 +10,7 @@ url = sys.argv[1] if len(sys.argv) > 1 else "https://x.com/bcherny/status/206443
 out_path = sys.argv[2] if len(sys.argv) > 2 else "assets/tweet_original.png"
 
 with sync_playwright() as p:
-    browser = p.chromium.launch()
+    browser = p.chromium.launch(channel="chrome")
     page = browser.new_page(viewport={"width": 720, "height": 2600},
                             device_scale_factor=2,
                             color_scheme="dark",

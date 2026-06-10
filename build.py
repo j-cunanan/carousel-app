@@ -28,31 +28,31 @@ SLIDE_W, SLIDE_H = 1080, 1350
 EMU_PER_PX = 9525  # 96 dpi
 
 
-def inject_fonts() -> None:
-    html = SRC.read_text().replace("/* __FONTS__ */", FONTS.read_text())
-    HTML.write_text(html)
-    print(f"[1/3] fonts inlined -> {HTML.name}")
+def inject_fonts(src_path: Path, out_html: Path) -> None:
+    html = src_path.read_text().replace("/* __FONTS__ */", FONTS.read_text())
+    out_html.write_text(html)
+    print(f"[1/3] fonts inlined {src_path.name} -> {out_html.name}")
 
 
-def render_slides(scale: int) -> list[Path]:
+def render_slides(html_path: Path, scale: int, prefix: str) -> list[Path]:
     from playwright.sync_api import sync_playwright
 
     OUT.mkdir(exist_ok=True)
     pngs = []
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(channel="chrome")
         page = browser.new_page(
             viewport={"width": SLIDE_W + 100, "height": SLIDE_H + 100},
             device_scale_factor=scale,
         )
-        page.goto(HTML.as_uri())
+        page.goto(html_path.as_uri())
         page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(400)  # font/image settle
+        page.wait_for_timeout(400)
 
         slides = page.locator(".slide")
         count = slides.count()
         for i in range(count):
-            out_path = OUT / f"slide_{i + 1:02d}.png"
+            out_path = OUT / f"{prefix}_{i + 1:02d}.png"
             slides.nth(i).screenshot(path=str(out_path))
             pngs.append(out_path)
             print(f"[2/3] rendered {out_path.name} ({SLIDE_W * scale}x{SLIDE_H * scale})")
@@ -60,7 +60,7 @@ def render_slides(scale: int) -> list[Path]:
     return pngs
 
 
-def export_pptx(pngs: list[Path]) -> Path:
+def export_pptx(pngs: list[Path], prefix: str) -> Path:
     from pptx import Presentation
     from pptx.util import Emu
 
@@ -72,7 +72,7 @@ def export_pptx(pngs: list[Path]) -> Path:
         slide = prs.slides.add_slide(blank)
         slide.shapes.add_picture(str(png), 0, 0,
                                  width=prs.slide_width, height=prs.slide_height)
-    out_path = OUT / "carousel.pptx"
+    out_path = OUT / f"{prefix}.pptx"
     prs.save(out_path)
     print(f"[3/3] exported {out_path} ({len(pngs)} pages)")
     return out_path
@@ -80,6 +80,8 @@ def export_pptx(pngs: list[Path]) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--src", type=Path, default=SRC, help="Source HTML template (default: carousel_src.html)")
+    ap.add_argument("--prefix", default="slide", help="Output filename prefix (default: slide)")
     ap.add_argument("--scale", type=int, default=1, help="PNG pixel density multiplier")
     ap.add_argument("--video-source", help="Also export a branded MP4 slide from this local file or URL")
     ap.add_argument("--video-tweet-embed-file", type=Path, help="HTML file containing a twitter-tweet blockquote")
@@ -105,12 +107,14 @@ def main() -> int:
     ap.add_argument("--video-post-date", help="Override detected post date in post-video layout")
     args = ap.parse_args()
 
-    inject_fonts()
-    pngs = render_slides(args.scale)
+    src_html = args.src
+    out_html = OUT / f"_build_{args.src.stem}.html"
+    inject_fonts(src_html, out_html)
+    pngs = render_slides(out_html, args.scale, args.prefix)
     if not pngs:
         print("no .slide elements found", file=sys.stderr)
         return 1
-    export_pptx(pngs)
+    export_pptx(pngs, args.prefix)
 
     if args.video_source or args.video_tweet_embed_file:
         from build_video_slide import build_video_slide

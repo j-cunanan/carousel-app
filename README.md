@@ -9,8 +9,55 @@ This repo renders LLMAW-branded carousel assets from HTML:
 ## One-time setup
 
 ```sh
+# Core deps (Playwright, python-pptx, yt-dlp, openai)
+uv sync
 uv run python -m playwright install chromium
+
+# Optional: X/Twitter API access (for fetch_tweet_data.py)
+# Install xurl — official X API CLI
+curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
+# Then authenticate with your X Developer app
+xurl auth apps add my-app --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET
+xurl auth oauth2 --app my-app
+xurl auth default my-app
+
+# Optional: xAI Grok Imagine (cover art via Grok subscription)
+# Reuses Hermes xAI OAuth token. Set XAI_API_KEY if using API key instead.
+export XAI_API_KEY=xai-...  # or: hermes auth add xai-oauth
 ```
+
+## AI Cover Art
+
+Generate LLMAW-branded cover art from a topic using GPT Image 2.0 or Grok Imagine:
+
+```sh
+# GPT Image 2.0 (default — uses OPENAI_API_KEY from ~/.hermes/.env)
+uv run python generate_cover.py "Fable 5 changes everything"
+
+# Grok Imagine (uses xAI OAuth or XAI_API_KEY)
+uv run python generate_cover.py "Why reasoning models win" --provider xai
+
+# Choose a visual style
+uv run python generate_cover.py "The prompt" --style typographic --out assets/cover.png
+
+# Preview the prompt without generating
+uv run python generate_cover.py "topic" --prompt-only
+```
+
+Styles: `abstract` (default), `typographic`, `minimal`, `illustrative`, `photo`.
+The script reads `brand.json` for the LLMAW color palette (cream paper #F4F2EC, dark ink #16140F, rust accent #C0552E) and builds a prompt that matches.
+
+## Tweet Data via X API
+
+Fetch structured tweet content + metadata via the official X API instead of brittle Playwright screenshots:
+
+```sh
+# Requires xurl installed and authenticated (see one-time setup)
+uv run python fetch_tweet_data.py https://x.com/bcherny/status/2064431111154053187
+uv run python fetch_tweet_data.py 2064431111154053187 --out tweet.json
+```
+
+Returns JSON with: id, text, author, handle, created_at, likes, retweets, replies, views, media URLs — all structured, no HTML scraping.
 
 ## Static PNG/PPTX build
 
