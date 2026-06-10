@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+
+assets/video_sources/
+out/_video_frame.html
+out/video_*.json
+out/video_*.mp4
+out/video_*.png
+out/post_video_*
+out/test_*
