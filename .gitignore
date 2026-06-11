@@ -16,7 +16,10 @@ out/post_video_*
 out/x_carousel/
 out/*_x_carousel*/
 out/test_*
-out/deepfake_03.mp4
+
+# Carousel output samples — keep current files, gitignore future builds
+out/*.png
+out/*.pptx
+out/*.mp4
 out/deepfake_03.json
-out/deepfake_03_poster.png
 out/deepfake_frame_03.png
