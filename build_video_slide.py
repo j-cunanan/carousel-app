@@ -689,7 +689,7 @@ def render_frame(
     print(f"[video 2/5] rendering branded frame -> {frame_out}")
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            browser = p.chromium.launch(channel="chrome")
             page = browser.new_page(
                 viewport={"width": SLIDE_W, "height": SLIDE_H},
                 device_scale_factor=1,
