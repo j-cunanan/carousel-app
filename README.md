@@ -27,11 +27,12 @@ Create a local `.env` with a Google AI Studio / Gemini API key for title imagery
 GOOGLE_API_KEY=your_google_ai_studio_key
 ```
 
-The X carousel workflow uses Gemini to detect the topic, identify involved companies and CEOs, and generate a branded first-slide image for the topic. You can override the defaults when AI Studio model names change:
+The X carousel workflow uses Gemini to detect the topic and identify involved companies and CEOs. It uses GPT Image 2.0 for the branded first-slide cover; Gemini is not used for image generation in this workflow. You can override the defaults when model names change:
 
 ```sh
 GEMINI_TEXT_MODEL=gemini-3.5-flash
-GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
+OPENAI_IMAGE_MODEL=gpt-image-2
+OPENAI_TITLE_IMAGE_SIZE=2048x1152
 ```
 
 Generated title images are cached inside the generated output folder. Make sure you have the rights to use generated or downloaded imagery in your final carousel.

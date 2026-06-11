@@ -28,6 +28,34 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 BRAND_PATH = ROOT / "brand.json"
 ASSETS = ROOT / "assets"
+DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2"
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith(("'", '"')):
+            quote = value[0]
+            end = value.find(quote, 1)
+            value = value[1:end] if end > 0 else value[1:]
+        else:
+            value = re.split(r"\s+#", value, 1)[0].strip()
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def load_local_env() -> None:
+    load_env_file(ROOT / ".env")
+    load_env_file(Path.home() / ".hermes" / ".env")
 
 
 def load_brand() -> dict[str, Any]:
@@ -69,9 +97,21 @@ def build_prompt(topic: str, style: str) -> str:
     )
 
 
-def generate_openai(prompt: str, out_path: Path) -> Path:
+def openai_api_key() -> str | None:
+    load_local_env()
+    return os.environ.get("OPENAI_API_KEY") or os.environ.get("VCPH_OPENAI_API_KEY")
+
+
+def generate_openai(
+    prompt: str,
+    out_path: Path,
+    *,
+    model: str | None = None,
+    size: str = "1024x1024",
+    quality: str | None = None,
+) -> Path:
     """Generate image via OpenAI GPT Image 2.0 (chat-based image output)."""
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("VCPH_OPENAI_API_KEY")
+    api_key = openai_api_key()
     if not api_key:
         raise SystemExit(
             "OPENAI_API_KEY not set. Set it in ~/.hermes/.env or export it."
@@ -85,13 +125,18 @@ def generate_openai(prompt: str, out_path: Path) -> Path:
         )
 
     client = OpenAI(api_key=api_key)
+    model = model or os.environ.get("OPENAI_IMAGE_MODEL") or DEFAULT_OPENAI_IMAGE_MODEL
+    request: dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+        "size": size,
+    }
+    if quality:
+        request["quality"] = quality
 
-    print(f"Generating cover art via GPT Image 2.0...")
-    response = client.images.generate(
-        model="gpt-image-2",
-        prompt=prompt,
-        n=1,
-    )
+    print(f"Generating cover art via {model}...")
+    response = client.images.generate(**request)
 
     # GPT Image 2 returns image data as b64_json (primary) or url
     image_data = response.data[0]
@@ -217,7 +262,7 @@ def main() -> int:
     out_path = args.out or ASSETS / f"cover_{re.sub(r'[^a-z0-9]+', '_', args.topic.lower()).strip('_')}.png"
 
     if args.provider == "openai":
-        generate_openai(prompt, out_path)
+        generate_openai(prompt, out_path, size=args.size)
     else:
         generate_xai(prompt, out_path)
 

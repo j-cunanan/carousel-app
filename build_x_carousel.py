@@ -12,7 +12,6 @@ post+video MP4 when video is available.
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import html
 import json
@@ -37,6 +36,7 @@ from build_video_slide import (
     extract_status_url,
     format_post_date,
 )
+from generate_cover import DEFAULT_OPENAI_IMAGE_MODEL, generate_openai, openai_api_key
 
 ROOT = Path(__file__).resolve().parent
 FONTS = ROOT / "assets" / "archivo.css"
@@ -46,7 +46,7 @@ X_COOKIE_DOMAINS = ("x.com", "twitter.com")
 GOOGLE_KG_ENDPOINT = "https://kgsearch.googleapis.com/v1/entities:search"
 GEMINI_API_ROOT = "https://generativelanguage.googleapis.com"
 DEFAULT_GEMINI_TEXT_MODEL = "gemini-3.5-flash"
-DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+DEFAULT_OPENAI_TITLE_IMAGE_SIZE = "2048x1152"
 GOOGLE_WARNED: set[str] = set()
 IMAGE_CONTENT_TYPES = {
     "image/jpeg": ".jpg",
@@ -92,10 +92,6 @@ def gemini_api_key() -> str | None:
 
 def gemini_text_model() -> str:
     return os.environ.get("GEMINI_TEXT_MODEL") or DEFAULT_GEMINI_TEXT_MODEL
-
-
-def gemini_image_model() -> str:
-    return os.environ.get("GEMINI_IMAGE_MODEL") or DEFAULT_GEMINI_IMAGE_MODEL
 
 
 def gemini_generate_content(
@@ -161,24 +157,6 @@ def extract_gemini_text(payload: dict[str, object] | None) -> str:
         for part in gemini_parts(payload)
         if isinstance(part.get("text"), str)
     ).strip()
-
-
-def extract_gemini_inline_image(payload: dict[str, object] | None) -> tuple[bytes, str] | None:
-    if not payload:
-        return None
-    for part in gemini_parts(payload):
-        inline_data = part.get("inlineData") or part.get("inline_data")
-        if not isinstance(inline_data, dict):
-            continue
-        data = inline_data.get("data")
-        if not isinstance(data, str):
-            continue
-        mime_type = inline_data.get("mimeType") or inline_data.get("mime_type") or "image/png"
-        try:
-            return base64.b64decode(data), str(mime_type)
-        except (ValueError, TypeError):
-            continue
-    return None
 
 
 def parse_json_object(text: str) -> dict[str, object] | None:
@@ -1082,13 +1060,19 @@ def default_title_image_prompt(
             continue
         ceo_bits.append(f"{ceo_name} of {company_name}" if company_name else ceo_name)
     ceo_line = ", ".join(ceo_bits)
-    parts = [f"Create a text-free editorial technology image about {topic}."]
-    if company_line:
-        parts.append(f"The company context is {company_line}, but do not show logos or brand marks.")
+    parts = [
+        f"Horizontal editorial cover art for an Instagram carousel about '{topic}'.",
+        "Cream/off-white paper background (#F4F2EC).",
+        "Dark ink (#16140F) and rust/terracotta accent color (#C0552E).",
+        "Abstract geometric composition, premium print magazine aesthetic, textured paper, editorial gravitas, intellectual but not cold.",
+        "The image must be visually relevant to the post topic, using symbolic editorial imagery rather than literal app UI.",
+    ]
     if ceo_line:
         parts.append(
-            f"Make these CEOs the primary visual subjects in close-up professional portrait imagery: {ceo_line}."
+            f"Add a tasteful editorial portrait element of the CEO: {ceo_line}."
         )
+    if company_line:
+        parts.append(f"Company context: {company_line}. Do not show logos or brand marks.")
     return " ".join(parts)
 
 
@@ -1103,69 +1087,49 @@ def title_image_prompt(
 {prompt}
 
 Format and style:
-- 16:9 horizontal editorial photograph or polished editorial illustration for a branded social carousel.
-- Use a real-world office, studio, lab, or abstract physical set, not a dashboard or screenshot.
-- If CEO names are provided, show them as close-up head-and-shoulders portraits.
-- CEO faces must be large, sharp, front-facing or three-quarter view, and occupy a prominent part of the frame.
-- Avoid full-body CEO shots, distant people, tiny background figures, backs of heads, or faces cropped off by the frame.
-- Absolutely no visible text of any kind in the image.
-- No letters, words, numbers, labels, captions, logos, app icons, brand marks, code, UI, screenshots, charts, diagrams, flowchart boxes, badges, posters, glass-board writing, or watermark.
+- 16:9 horizontal composition, 2048x1152.
+- Make it feel like the output of generate_cover.py, not a corporate headshot.
+- Keep the CEO as a strong supporting visual element, not the entire concept.
+- Use abstract editorial metaphors, architectural shapes, paper texture, ink wash, grain, and restrained magazine-cover composition.
+- No visible text of any kind: no letters, words, numbers, labels, captions, logos, app icons, brand marks, code, UI, screenshots, charts, diagrams, flowchart boxes, badges, posters, glass-board writing, or watermark.
 - Do not place any graphic or symbol that resembles text.
-- Keep it as a standalone image; carousel typography will sit outside the image, not over it.
-- Warm off-white, charcoal, rust, and deep green palette that fits the LLMAW carousel style.
-- Cinematic but clean, with balanced subject placement.
+- Carousel typography will sit outside the image, not over it.
 """.strip()
 
 
-def generated_image_path(out_dir: Path, topic: str, prompt: str, mime_type: str) -> Path:
-    ext = IMAGE_CONTENT_TYPES.get(mime_type.split(";", 1)[0].strip().lower(), ".png")
-    digest = hashlib.sha1(f"{topic}\n{prompt}".encode("utf-8")).hexdigest()[:10]
-    return out_dir / "title_assets" / f"gemini-topic-{digest}{ext}"
+def generated_openai_image_path(out_dir: Path, topic: str, prompt: str) -> Path:
+    digest = hashlib.sha1(f"openai\n{topic}\n{prompt}".encode("utf-8")).hexdigest()[:10]
+    return out_dir / "title_assets" / f"openai-topic-{digest}.png"
 
 
-def generate_gemini_topic_image(
+def openai_title_image_model() -> str:
+    return os.environ.get("OPENAI_IMAGE_MODEL") or DEFAULT_OPENAI_IMAGE_MODEL
+
+
+def openai_title_image_size() -> str:
+    return os.environ.get("OPENAI_TITLE_IMAGE_SIZE") or DEFAULT_OPENAI_TITLE_IMAGE_SIZE
+
+
+def generate_openai_topic_image(
     topic: str,
     companies: list[dict[str, object]],
     ceos: list[dict[str, object]],
     analysis: dict[str, object] | None,
     out_dir: Path,
-    api_key: str | None,
 ) -> tuple[Path | None, str]:
-    if not api_key:
+    if not openai_api_key():
         return None, ""
-    model = gemini_image_model()
     prompt = title_image_prompt(topic, companies, ceos, analysis)
-    base_payload: dict[str, object] = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-    }
-    payloads = [
-        base_payload,
-        {**base_payload, "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}},
-    ]
-    configured_version = os.environ.get("GEMINI_IMAGE_API_VERSION")
-    api_versions = [configured_version] if configured_version else ["v1", "v1beta"]
-    for api_version in api_versions:
-        if not api_version:
-            continue
-        for payload in payloads:
-            response = gemini_generate_content(
-                model,
-                api_key,
-                payload,
-                api_version=api_version,
-                timeout=90,
-            )
-            inline_image = extract_gemini_inline_image(response)
-            if not inline_image:
-                continue
-            data, mime_type = inline_image
-            path = generated_image_path(out_dir, topic, prompt, mime_type)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-            print(f"[google] generated Gemini title image -> {path}")
-            return path, prompt
-    google_warn("[google] Gemini image model returned no image; using title visual fallback")
-    return None, prompt
+    path = generated_openai_image_path(out_dir, topic, prompt)
+    model = openai_title_image_model()
+    size = openai_title_image_size()
+    try:
+        generate_openai(prompt, path, model=model, size=size)
+    except (SystemExit, Exception) as exc:
+        print(f"[openai] GPT Image title cover failed; using non-AI title fallback ({exc})")
+        return None, prompt
+    print(f"[openai] generated GPT Image title cover -> {path}")
+    return path, prompt
 
 
 def build_title_enrichment(
@@ -1192,14 +1156,16 @@ def build_title_enrichment(
 
     companies = normalize_gemini_companies(analysis, posts)
     ceos = ceos_from_companies(companies)
-    topic_image_path, generated_prompt = generate_gemini_topic_image(
+    topic_image_path, generated_prompt = generate_openai_topic_image(
         topic,
         companies,
         ceos,
         analysis,
         out_dir,
-        api_key,
     )
+    image_provider = "openai" if topic_image_path else ""
+    if not generated_prompt:
+        generated_prompt = title_image_prompt(topic, companies, ceos, analysis)
     topic_entity = None
 
     if kg_api_key:
@@ -1255,6 +1221,7 @@ def build_title_enrichment(
                     assets_dir,
                     f"topic-{topic_entity.get('name', 'topic')}",
                 )
+                image_provider = "knowledge_graph" if topic_image_path else image_provider
     if not topic_image_path:
         topic_image_path = next(
             (
@@ -1264,6 +1231,7 @@ def build_title_enrichment(
             ),
             None,
         )
+        image_provider = "knowledge_graph" if topic_image_path else image_provider
     if not topic_image_path:
         topic_image_path = next(
             (
@@ -1273,6 +1241,7 @@ def build_title_enrichment(
             ),
             None,
         )
+        image_provider = "knowledge_graph" if topic_image_path else image_provider
 
     context: dict[str, object] = {
         "topic": topic,
@@ -1282,8 +1251,10 @@ def build_title_enrichment(
         "topic_image_path": topic_image_path,
         "google_enabled": bool(api_key),
         "provider": "gemini" if api_key else "local",
+        "image_provider": image_provider,
         "gemini_text_model": gemini_text_model() if api_key else "",
-        "gemini_image_model": gemini_image_model() if api_key else "",
+        "openai_image_model": openai_title_image_model() if openai_api_key() else "",
+        "openai_image_size": openai_title_image_size() if openai_api_key() else "",
         "generated_image_prompt": generated_prompt,
     }
     return context
@@ -1579,9 +1550,11 @@ def manifest_title_context(context: dict[str, object]) -> dict[str, object]:
     return {
         "topic": context.get("topic", ""),
         "provider": context.get("provider", ""),
+        "image_provider": context.get("image_provider", ""),
         "google_enabled": bool(context.get("google_enabled")),
         "gemini_text_model": context.get("gemini_text_model", ""),
-        "gemini_image_model": context.get("gemini_image_model", ""),
+        "openai_image_model": context.get("openai_image_model", ""),
+        "openai_image_size": context.get("openai_image_size", ""),
         "generated_image_prompt": context.get("generated_image_prompt", ""),
         "topic_entity": manifest_entity(topic_entity) if isinstance(topic_entity, dict) else None,
         "topic_image_path": str(topic_image_path) if isinstance(topic_image_path, Path) else "",
