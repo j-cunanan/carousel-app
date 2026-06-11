@@ -1,0 +1,36 @@
+{
+  "topic": "AI trending June 2026",
+  "mode": "urls",
+  "tweets_captured": 3,
+  "total_slides": 5,
+  "slides": [
+    {
+      "num": 1,
+      "type": "title",
+      "path": "/Users/buloy/projects/carousel-app/out/x_roundup/roundup_ai_trending_june_2026_01.png"
+    },
+    {
+      "num": 2,
+      "type": "tweet",
+      "author": "",
+      "path": "/Users/buloy/projects/carousel-app/out/x_roundup/roundup_ai_trending_june_2026_02.png"
+    },
+    {
+      "num": 3,
+      "type": "tweet",
+      "author": "",
+      "path": "/Users/buloy/projects/carousel-app/out/x_roundup/roundup_ai_trending_june_2026_03.png"
+    },
+    {
+      "num": 4,
+      "type": "tweet",
+      "author": "",
+      "path": "/Users/buloy/projects/carousel-app/out/x_roundup/roundup_ai_trending_june_2026_04.png"
+    },
+    {
+      "num": 5,
+      "type": "cta",
+      "path": "/Users/buloy/projects/carousel-app/out/x_roundup/roundup_ai_trending_june_2026_05.png"
+    }
+  ]
+}
