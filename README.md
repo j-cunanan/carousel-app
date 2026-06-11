@@ -12,6 +12,21 @@ This repo renders LLMAW-branded carousel assets from HTML:
 uv run python -m playwright install chromium
 ```
 
+Create a local `.env` with a Google AI Studio / Gemini API key for title imagery:
+
+```sh
+GOOGLE_API_KEY=your_google_ai_studio_key
+```
+
+The X carousel workflow uses Gemini to detect the topic, identify involved companies and CEOs, and generate a branded first-slide image for the topic. You can override the defaults when AI Studio model names change:
+
+```sh
+GEMINI_TEXT_MODEL=gemini-3.5-flash
+GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
+```
+
+Generated title images are cached inside the generated output folder. Make sure you have the rights to use generated or downloaded imagery in your final carousel.
+
 ## Static PNG/PPTX build
 
 ```sh

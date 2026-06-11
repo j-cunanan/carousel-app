@@ -12,6 +12,8 @@ post+video MP4 when video is available.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import html
 import json
 import os
@@ -20,6 +22,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
 
 from build_video_slide import (
     OUT,
@@ -38,6 +43,420 @@ FONTS = ROOT / "assets" / "archivo.css"
 DEFAULT_OUT = OUT / "x_carousel"
 
 X_COOKIE_DOMAINS = ("x.com", "twitter.com")
+GOOGLE_KG_ENDPOINT = "https://kgsearch.googleapis.com/v1/entities:search"
+GEMINI_API_ROOT = "https://generativelanguage.googleapis.com"
+DEFAULT_GEMINI_TEXT_MODEL = "gemini-3.5-flash"
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+GOOGLE_WARNED: set[str] = set()
+IMAGE_CONTENT_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith(("'", '"')):
+            quote = value[0]
+            end = value.find(quote, 1)
+            value = value[1:end] if end > 0 else value[1:]
+        else:
+            value = re.split(r"\s+#", value, 1)[0].strip()
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def google_warn(message: str) -> None:
+    if message in GOOGLE_WARNED:
+        return
+    GOOGLE_WARNED.add(message)
+    print(message)
+
+
+def gemini_api_key() -> str | None:
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+def gemini_text_model() -> str:
+    return os.environ.get("GEMINI_TEXT_MODEL") or DEFAULT_GEMINI_TEXT_MODEL
+
+
+def gemini_image_model() -> str:
+    return os.environ.get("GEMINI_IMAGE_MODEL") or DEFAULT_GEMINI_IMAGE_MODEL
+
+
+def gemini_generate_content(
+    model: str,
+    api_key: str | None,
+    payload: dict[str, object],
+    *,
+    api_version: str,
+    timeout: int = 30,
+) -> dict[str, object] | None:
+    if not api_key:
+        return None
+    request = Request(
+        f"{GEMINI_API_ROOT}/{api_version}/models/{model}:generateContent",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+            "User-Agent": "carousel-app/1.0",
+        },
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = ""
+        try:
+            error_payload = json.loads(exc.read().decode("utf-8"))
+            error = error_payload.get("error")
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                detail = f": {error['message'][:160]}"
+        except (OSError, json.JSONDecodeError):
+            detail = ""
+        google_warn(f"[google] Gemini {model} returned HTTP {exc.code}{detail}")
+    except (OSError, URLError, json.JSONDecodeError):
+        google_warn(f"[google] Gemini {model} request failed; continuing without it")
+    return None
+
+
+def gemini_parts(payload: dict[str, object]) -> list[dict[str, object]]:
+    parts: list[dict[str, object]] = []
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return parts
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            continue
+        candidate_parts = content.get("parts")
+        if isinstance(candidate_parts, list):
+            parts.extend(part for part in candidate_parts if isinstance(part, dict))
+    return parts
+
+
+def extract_gemini_text(payload: dict[str, object] | None) -> str:
+    if not payload:
+        return ""
+    return "\n".join(
+        str(part.get("text"))
+        for part in gemini_parts(payload)
+        if isinstance(part.get("text"), str)
+    ).strip()
+
+
+def extract_gemini_inline_image(payload: dict[str, object] | None) -> tuple[bytes, str] | None:
+    if not payload:
+        return None
+    for part in gemini_parts(payload):
+        inline_data = part.get("inlineData") or part.get("inline_data")
+        if not isinstance(inline_data, dict):
+            continue
+        data = inline_data.get("data")
+        if not isinstance(data, str):
+            continue
+        mime_type = inline_data.get("mimeType") or inline_data.get("mime_type") or "image/png"
+        try:
+            return base64.b64decode(data), str(mime_type)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def parse_json_object(text: str) -> dict[str, object] | None:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*```$", "", text).strip()
+    candidates = [text]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def string_value(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def safe_filename(value: str, fallback: str = "asset") -> str:
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
+    if not value:
+        value = fallback
+    return value[:64]
+
+
+def compact_topic(text: str, limit: int = 95) -> str:
+    text = clean_post_text(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].strip()
+
+
+def kg_search(
+    query: str,
+    api_key: str | None,
+    *,
+    types: tuple[str, ...] = (),
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    if not api_key or not query.strip():
+        return []
+    params: list[tuple[str, str]] = [
+        ("query", query.strip()),
+        ("key", api_key),
+        ("limit", str(limit)),
+        ("languages", "en"),
+        ("indent", "false"),
+    ]
+    params.extend(("types", item) for item in types)
+    request = Request(
+        f"{GOOGLE_KG_ENDPOINT}?{urlencode(params)}",
+        headers={"User-Agent": "carousel-app/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        google_warn(
+            f"[google] Knowledge Graph lookup returned HTTP {exc.code}; "
+            "check GOOGLE_KG_API_KEY and API enablement"
+        )
+        return []
+    except (OSError, URLError, json.JSONDecodeError):
+        google_warn("[google] Knowledge Graph lookup failed; continuing without Google images")
+        return []
+    items = payload.get("itemListElement", [])
+    return [item for item in items if isinstance(item, dict)]
+
+
+def entity_from_kg_item(item: dict[str, object]) -> dict[str, object] | None:
+    result = item.get("result")
+    if not isinstance(result, dict):
+        return None
+    name = result.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    image = result.get("image")
+    detailed = result.get("detailedDescription")
+    return {
+        "id": result.get("@id", ""),
+        "name": name.strip(),
+        "description": result.get("description", ""),
+        "types": result.get("@type", []),
+        "image_url": image.get("contentUrl") if isinstance(image, dict) else "",
+        "source_url": image.get("url") if isinstance(image, dict) else result.get("url", ""),
+        "license": image.get("license") if isinstance(image, dict) else "",
+        "detail": detailed.get("articleBody") if isinstance(detailed, dict) else "",
+        "score": item.get("resultScore", 0),
+    }
+
+
+def first_kg_entity(
+    query: str,
+    api_key: str | None,
+    *,
+    types: tuple[str, ...] = (),
+    require_image: bool = False,
+    reject_types: tuple[str, ...] = (),
+) -> dict[str, object] | None:
+    for item in kg_search(query, api_key, types=types, limit=6):
+        entity = entity_from_kg_item(item)
+        if not entity:
+            continue
+        entity_types = {str(item_type) for item_type in entity.get("types", [])}
+        if any(rejected in entity_types for rejected in reject_types):
+            continue
+        if require_image and not entity.get("image_url"):
+            continue
+        return entity
+    return None
+
+
+def image_extension(content_type: str, url: str) -> str:
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    if content_type in IMAGE_CONTENT_TYPES:
+        return IMAGE_CONTENT_TYPES[content_type]
+    suffix = Path(urlparse(url).path).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+    return ".jpg"
+
+
+def download_image(url: object, out_dir: Path, stem: str) -> Path | None:
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 carousel-app/1.0",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        },
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            content_type = response.headers.get("Content-Type", "")
+            data = response.read(8_000_001)
+    except (OSError, URLError):
+        return None
+    if len(data) > 8_000_000:
+        return None
+    ext = image_extension(content_type, url)
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+    path = out_dir / f"{safe_filename(stem)}-{digest}{ext}"
+    path.write_bytes(data)
+    return path
+
+
+def normalized_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def company_candidate_terms(posts: list[dict[str, str]]) -> list[str]:
+    terms: list[str] = []
+    stopwords = {
+        "AI",
+        "API",
+        "Codex",
+        "From",
+        "Jun",
+        "Reply",
+        "Show",
+        "The",
+        "These",
+        "This",
+        "Translate",
+        "We",
+        "What",
+    }
+
+    def add(term: str) -> None:
+        term = re.sub(r"\s+", " ", term.strip(" .,:;()[]{}"))
+        if len(term) < 3 or term in stopwords:
+            return
+        if normalized_key(term) and all(normalized_key(term) != normalized_key(existing) for existing in terms):
+            terms.append(term)
+
+    for post in posts:
+        add(post.get("author", ""))
+        handle = post.get("handle", "").lstrip("@")
+        if handle:
+            add(handle)
+        text = post.get("text", "")
+        for match in re.finditer(
+            r"\b(?:[A-Z][A-Za-z0-9&._-]{2,}|[A-Z]{2,})"
+            r"(?:\s+(?:[A-Z][A-Za-z0-9&._-]{2,}|[A-Z]{2,})){0,3}",
+            text,
+        ):
+            add(match.group(0))
+            if len(terms) >= 8:
+                break
+        if len(terms) >= 8:
+            break
+    return terms[:8]
+
+
+def find_company_entities(posts: list[dict[str, str]], api_key: str | None) -> list[dict[str, object]]:
+    candidates = company_candidate_terms(posts)
+    if not api_key:
+        return [{"name": term, "query": term} for term in candidates[:1]]
+
+    companies: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for term in candidates:
+        queries = [f"{term} company", term]
+        for query in queries:
+            entity = (
+                first_kg_entity(query, api_key, types=("Organization",), reject_types=("Person",))
+                or first_kg_entity(query, api_key, reject_types=("Person",))
+            )
+            if not entity:
+                continue
+            key = normalized_key(str(entity["name"]))
+            if key in seen:
+                break
+            seen.add(key)
+            entity["query"] = query
+            companies.append(entity)
+            break
+        if len(companies) >= 3:
+            break
+    if companies:
+        return companies
+    return [{"name": term, "query": term} for term in candidates[:1]]
+
+
+def find_ceo_entity(company: dict[str, object], api_key: str | None) -> dict[str, object] | None:
+    if not api_key:
+        return None
+    company_name = str(company.get("name", ""))
+    queries = [
+        f"{company_name} CEO",
+        f"{company_name} chief executive officer",
+    ]
+    for query in queries:
+        for item in kg_search(query, api_key, types=("Person",), limit=6):
+            entity = entity_from_kg_item(item)
+            if not entity:
+                continue
+            haystack = " ".join(
+                str(entity.get(field, "")) for field in ("name", "description", "detail")
+            ).lower()
+            if "ceo" in haystack or "chief executive" in haystack or company_name.lower() in haystack:
+                entity["company"] = company_name
+                entity["query"] = query
+                return entity
+    return None
+
+
+def find_topic_entity(topic: str, companies: list[dict[str, object]], api_key: str | None) -> dict[str, object] | None:
+    if not api_key:
+        return None
+    queries = [topic]
+    for company in companies[:2]:
+        company_name = str(company.get("name", ""))
+        if company_name:
+            queries.insert(0, f"{company_name} {topic}")
+            queries.append(company_name)
+    seen: set[str] = set()
+    for query in queries:
+        query = compact_topic(query, 110)
+        key = normalized_key(query)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        entity = first_kg_entity(query, api_key, require_image=True)
+        if entity:
+            return entity
+    return None
 
 
 def canonical_x_url(value: str) -> str:
@@ -503,6 +922,384 @@ def title_from_post(post: dict[str, str]) -> tuple[str, str]:
     return words, ""
 
 
+def title_font_size(text: str) -> int:
+    if len(text) > 95:
+        return 58
+    if len(text) > 74:
+        return 64
+    if len(text) > 52:
+        return 72
+    return 82
+
+
+def asset_uri(path: object) -> str:
+    if isinstance(path, Path) and path.exists():
+        return path.resolve().as_uri()
+    return ""
+
+
+def gemini_post_brief(posts: list[dict[str, str]]) -> list[dict[str, str]]:
+    brief: list[dict[str, str]] = []
+    for post in posts[:8]:
+        brief.append(
+            {
+                "author": post.get("author", ""),
+                "handle": post.get("handle", ""),
+                "text": clean_post_text(post.get("text", ""))[:1800],
+                "url": post.get("url", ""),
+            }
+        )
+    return brief
+
+
+def gemini_title_analysis(
+    posts: list[dict[str, str]],
+    fallback_topic: str,
+    api_key: str | None,
+) -> dict[str, object] | None:
+    if not api_key:
+        return None
+    model = gemini_text_model()
+    prompt = f"""
+You prepare editorial carousel title-slide metadata from X/Twitter posts.
+Use Google Search grounding when available to identify companies and their current CEOs.
+Return JSON only with this exact shape:
+{{
+  "topic": "short topic, 4 to 10 words",
+  "companies": [
+    {{"name": "Company name", "ceo_name": "Current CEO name"}}
+  ]
+}}
+
+Rules:
+- Include at most 3 companies.
+- Include a CEO only when the company is clearly involved in the post or thread.
+- Prefer the current CEO over founders, product leaders, or former CEOs.
+- If no company is clearly involved, return an empty companies array.
+- Do not include markdown, comments, source citations, or extra keys.
+
+Fallback topic: {fallback_topic}
+Posts JSON:
+{json.dumps(gemini_post_brief(posts), ensure_ascii=False)}
+""".strip()
+    base_payload: dict[str, object] = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
+    }
+    api_version = os.environ.get("GEMINI_TEXT_API_VERSION") or "v1beta"
+    payloads = [
+        {**base_payload, "tools": [{"google_search": {}}]},
+        base_payload,
+    ]
+    for payload in payloads:
+        response = gemini_generate_content(
+            model,
+            api_key,
+            payload,
+            api_version=api_version,
+            timeout=45,
+        )
+        parsed = parse_json_object(extract_gemini_text(response))
+        if parsed:
+            return parsed
+    google_warn("[google] Gemini could not return title metadata; using local topic fallback")
+    return None
+
+
+def normalize_gemini_companies(
+    analysis: dict[str, object] | None,
+    posts: list[dict[str, str]],
+) -> list[dict[str, object]]:
+    companies: list[dict[str, object]] = []
+    seen: set[str] = set()
+    raw_companies = analysis.get("companies") if isinstance(analysis, dict) else None
+    if isinstance(raw_companies, list):
+        for raw_company in raw_companies:
+            if not isinstance(raw_company, dict):
+                continue
+            name = string_value(raw_company.get("name"))
+            if not name:
+                continue
+            key = normalized_key(name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            company: dict[str, object] = {
+                "name": name,
+                "query": name,
+                "provider": "gemini",
+            }
+            ceo_name = string_value(raw_company.get("ceo_name"))
+            if ceo_name:
+                company["ceo_name"] = ceo_name
+            companies.append(company)
+            if len(companies) >= 3:
+                break
+    if companies:
+        return companies
+    fallback_companies = find_company_entities(posts, None)
+    for company in fallback_companies[:1]:
+        company["provider"] = "local"
+    return fallback_companies[:1]
+
+
+def ceos_from_companies(companies: list[dict[str, object]]) -> list[dict[str, object]]:
+    ceos: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for company in companies:
+        ceo_name = string_value(company.get("ceo_name"))
+        company_name = string_value(company.get("name"))
+        key = normalized_key(f"{ceo_name} {company_name}")
+        if not ceo_name or not key or key in seen:
+            continue
+        seen.add(key)
+        ceos.append(
+            {
+                "name": ceo_name,
+                "company": company_name,
+                "description": "CEO",
+                "query": f"{ceo_name} {company_name}",
+                "provider": "gemini",
+            }
+        )
+    return ceos
+
+
+def default_title_image_prompt(
+    topic: str,
+    companies: list[dict[str, object]],
+    ceos: list[dict[str, object]],
+) -> str:
+    company_line = ", ".join(string_value(company.get("name")) for company in companies if company.get("name"))
+    ceo_bits = []
+    for ceo in ceos:
+        ceo_name = string_value(ceo.get("name"))
+        company_name = string_value(ceo.get("company"))
+        if not ceo_name:
+            continue
+        ceo_bits.append(f"{ceo_name} of {company_name}" if company_name else ceo_name)
+    ceo_line = ", ".join(ceo_bits)
+    parts = [f"Create a text-free editorial technology image about {topic}."]
+    if company_line:
+        parts.append(f"The company context is {company_line}, but do not show logos or brand marks.")
+    if ceo_line:
+        parts.append(
+            f"Make these CEOs the primary visual subjects in close-up professional portrait imagery: {ceo_line}."
+        )
+    return " ".join(parts)
+
+
+def title_image_prompt(
+    topic: str,
+    companies: list[dict[str, object]],
+    ceos: list[dict[str, object]],
+    analysis: dict[str, object] | None,
+) -> str:
+    prompt = default_title_image_prompt(topic, companies, ceos)
+    return f"""
+{prompt}
+
+Format and style:
+- 16:9 horizontal editorial photograph or polished editorial illustration for a branded social carousel.
+- Use a real-world office, studio, lab, or abstract physical set, not a dashboard or screenshot.
+- If CEO names are provided, show them as close-up head-and-shoulders portraits.
+- CEO faces must be large, sharp, front-facing or three-quarter view, and occupy a prominent part of the frame.
+- Avoid full-body CEO shots, distant people, tiny background figures, backs of heads, or faces cropped off by the frame.
+- Absolutely no visible text of any kind in the image.
+- No letters, words, numbers, labels, captions, logos, app icons, brand marks, code, UI, screenshots, charts, diagrams, flowchart boxes, badges, posters, glass-board writing, or watermark.
+- Do not place any graphic or symbol that resembles text.
+- Keep it as a standalone image; carousel typography will sit outside the image, not over it.
+- Warm off-white, charcoal, rust, and deep green palette that fits the LLMAW carousel style.
+- Cinematic but clean, with balanced subject placement.
+""".strip()
+
+
+def generated_image_path(out_dir: Path, topic: str, prompt: str, mime_type: str) -> Path:
+    ext = IMAGE_CONTENT_TYPES.get(mime_type.split(";", 1)[0].strip().lower(), ".png")
+    digest = hashlib.sha1(f"{topic}\n{prompt}".encode("utf-8")).hexdigest()[:10]
+    return out_dir / "title_assets" / f"gemini-topic-{digest}{ext}"
+
+
+def generate_gemini_topic_image(
+    topic: str,
+    companies: list[dict[str, object]],
+    ceos: list[dict[str, object]],
+    analysis: dict[str, object] | None,
+    out_dir: Path,
+    api_key: str | None,
+) -> tuple[Path | None, str]:
+    if not api_key:
+        return None, ""
+    model = gemini_image_model()
+    prompt = title_image_prompt(topic, companies, ceos, analysis)
+    base_payload: dict[str, object] = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+    }
+    payloads = [
+        base_payload,
+        {**base_payload, "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}},
+    ]
+    configured_version = os.environ.get("GEMINI_IMAGE_API_VERSION")
+    api_versions = [configured_version] if configured_version else ["v1", "v1beta"]
+    for api_version in api_versions:
+        if not api_version:
+            continue
+        for payload in payloads:
+            response = gemini_generate_content(
+                model,
+                api_key,
+                payload,
+                api_version=api_version,
+                timeout=90,
+            )
+            inline_image = extract_gemini_inline_image(response)
+            if not inline_image:
+                continue
+            data, mime_type = inline_image
+            path = generated_image_path(out_dir, topic, prompt, mime_type)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            print(f"[google] generated Gemini title image -> {path}")
+            return path, prompt
+    google_warn("[google] Gemini image model returned no image; using title visual fallback")
+    return None, prompt
+
+
+def build_title_enrichment(
+    posts: list[dict[str, str]],
+    *,
+    title: str | None,
+    out_dir: Path,
+) -> dict[str, object]:
+    api_key = gemini_api_key()
+    kg_api_key = os.environ.get("GOOGLE_KG_API_KEY")
+    topic = title or " ".join(part for part in title_from_post(posts[0]) if part).strip()
+    topic = compact_topic(topic or posts[0].get("text", "Source post"))
+    assets_dir = out_dir / "title_assets"
+    if api_key:
+        print("[google] enriching title slide with Google AI Studio / Gemini")
+    else:
+        print("[google] GOOGLE_API_KEY or GEMINI_API_KEY not set; using generated title visual")
+
+    analysis = gemini_title_analysis(posts, topic, api_key)
+    if isinstance(analysis, dict):
+        gemini_topic = compact_topic(string_value(analysis.get("topic")))
+        if gemini_topic:
+            topic = gemini_topic
+
+    companies = normalize_gemini_companies(analysis, posts)
+    ceos = ceos_from_companies(companies)
+    topic_image_path, generated_prompt = generate_gemini_topic_image(
+        topic,
+        companies,
+        ceos,
+        analysis,
+        out_dir,
+        api_key,
+    )
+    topic_entity = None
+
+    if kg_api_key:
+        print("[google] optional Knowledge Graph image lookup enabled via GOOGLE_KG_API_KEY")
+        for company in companies:
+            company_name = string_value(company.get("name"))
+            kg_entity = first_kg_entity(
+                f"{company_name} company",
+                kg_api_key,
+                types=("Organization",),
+                reject_types=("Person",),
+            )
+            if not kg_entity:
+                continue
+            for key in ("description", "source_url", "license", "image_url"):
+                if kg_entity.get(key):
+                    company[key] = kg_entity[key]
+            image_path = download_image(
+                company.get("image_url"),
+                assets_dir,
+                f"company-{company.get('name', 'company')}",
+            )
+            if image_path:
+                company["image_path"] = image_path
+
+        for ceo in ceos:
+            ceo_name = string_value(ceo.get("name"))
+            company_name = string_value(ceo.get("company"))
+            kg_entity = first_kg_entity(
+                f"{ceo_name} {company_name}",
+                kg_api_key,
+                types=("Person",),
+                require_image=True,
+            )
+            if not kg_entity:
+                continue
+            for key in ("description", "source_url", "license", "image_url"):
+                if kg_entity.get(key):
+                    ceo[key] = kg_entity[key]
+            image_path = download_image(
+                ceo.get("image_url"),
+                assets_dir,
+                f"ceo-{ceo.get('name', 'ceo')}",
+            )
+            if image_path:
+                ceo["image_path"] = image_path
+
+        if not topic_image_path:
+            topic_entity = find_topic_entity(topic, companies, kg_api_key)
+            if topic_entity:
+                topic_image_path = download_image(
+                    topic_entity.get("image_url"),
+                    assets_dir,
+                    f"topic-{topic_entity.get('name', 'topic')}",
+                )
+    if not topic_image_path:
+        topic_image_path = next(
+            (
+                company.get("image_path")
+                for company in companies
+                if isinstance(company.get("image_path"), Path)
+            ),
+            None,
+        )
+    if not topic_image_path:
+        topic_image_path = next(
+            (
+                ceo.get("image_path")
+                for ceo in ceos
+                if isinstance(ceo.get("image_path"), Path)
+            ),
+            None,
+        )
+
+    context: dict[str, object] = {
+        "topic": topic,
+        "companies": companies,
+        "ceos": ceos,
+        "topic_entity": topic_entity,
+        "topic_image_path": topic_image_path,
+        "google_enabled": bool(api_key),
+        "provider": "gemini" if api_key else "local",
+        "gemini_text_model": gemini_text_model() if api_key else "",
+        "gemini_image_model": gemini_image_model() if api_key else "",
+        "generated_image_prompt": generated_prompt,
+    }
+    return context
+
+
+def title_visual_markup(context: dict[str, object]) -> str:
+    topic_image_uri = asset_uri(context.get("topic_image_path"))
+    bg_style = f' style="background-image: url({topic_image_uri})"' if topic_image_uri else ""
+    return f"""
+  <div class="visual-card">
+    <div class="visual-bg"{bg_style}></div>
+    <div class="visual-fallback"></div>
+  </div>
+"""
+
+
 def shared_css() -> str:
     return f"""
 {FONTS.read_text()}
@@ -605,36 +1402,72 @@ def dot_markup(active: int, count: int) -> str:
     return "\n".join('<div class="dash"></div>' if i == active else '<div class="dot"></div>' for i in range(1, count + 1))
 
 
-def render_title_slide(post: dict[str, str], out_path: Path, count: int, title: str | None) -> Path:
+def render_title_slide(
+    post: dict[str, str],
+    out_path: Path,
+    count: int,
+    title: str | None,
+    title_context: dict[str, object],
+) -> Path:
     headline, accent = title_from_post(post)
     if title:
         bits = title.rsplit(" ", 1)
         headline, accent = (bits[0], bits[1]) if len(bits) == 2 else (title, "")
     source = f"{post.get('author', 'Source post')} {post.get('handle', '')}".strip()
+    title_text = " ".join(part for part in (headline, accent) if part)
+    font_size = title_font_size(title_text)
     html_path = out_path.with_suffix(".html")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     safe_headline = html.escape(headline)
     safe_accent = html.escape(accent)
     safe_source = html.escape(source)
+    visual = title_visual_markup(title_context)
     html_text = f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
 {shared_css()}
+.visual-card {{
+  position: absolute;
+  top: 142px;
+  left: 78px;
+  width: 924px;
+  height: 500px;
+  overflow: hidden;
+  border-radius: 30px;
+  background: #151713;
+  box-shadow: 0 34px 80px rgba(20, 18, 14, 0.22);
+}}
+.visual-bg, .visual-fallback {{
+  position: absolute;
+  inset: 0;
+}}
+.visual-bg {{
+  z-index: 1;
+  background-position: center;
+  background-size: cover;
+  filter: saturate(0.96) contrast(1.02);
+}}
+.visual-fallback {{
+  z-index: 0;
+  background:
+    linear-gradient(135deg, rgba(192, 85, 46, 0.74), rgba(22, 20, 15, 0.94)),
+    repeating-linear-gradient(90deg, rgba(244, 242, 236, 0.12) 0 2px, transparent 2px 18px);
+}}
 .title-cluster {{
   position: absolute;
-  left: 118px;
-  right: 118px;
-  top: 348px;
+  left: 104px;
+  right: 104px;
+  top: 708px;
   text-align: center;
 }}
 .headline {{
-  font-size: 92px;
+  font-size: {font_size}px;
   font-weight: 850;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   line-height: 1.05;
 }}
 .headline .accent {{ color: var(--primary); }}
 .source {{
-  margin-top: 34px;
+  margin-top: 28px;
   font-size: 30px;
   font-weight: 650;
   color: var(--ink-soft);
@@ -643,7 +1476,7 @@ def render_title_slide(post: dict[str, str], out_path: Path, count: int, title: 
 <body>
 <div class="slide">
 {handle_markup()}
-  <div class="kicker"><em>From X</em></div>
+  {visual}
   <div class="title-cluster">
     <h1 class="headline">{safe_headline}<br><span class="accent">{safe_accent}</span></h1>
     <div class="source">{safe_source}</div>
@@ -719,6 +1552,52 @@ def render_html_slide(html_path: Path, out_path: Path) -> None:
         browser.close()
 
 
+def manifest_entity(entity: dict[str, object]) -> dict[str, object]:
+    item: dict[str, object] = {}
+    for key in (
+        "name",
+        "description",
+        "query",
+        "source_url",
+        "license",
+        "company",
+        "ceo_name",
+        "provider",
+    ):
+        value = entity.get(key)
+        if value:
+            item[key] = value
+    image_path = entity.get("image_path")
+    if isinstance(image_path, Path):
+        item["image_path"] = str(image_path)
+    return item
+
+
+def manifest_title_context(context: dict[str, object]) -> dict[str, object]:
+    topic_image_path = context.get("topic_image_path")
+    topic_entity = context.get("topic_entity")
+    return {
+        "topic": context.get("topic", ""),
+        "provider": context.get("provider", ""),
+        "google_enabled": bool(context.get("google_enabled")),
+        "gemini_text_model": context.get("gemini_text_model", ""),
+        "gemini_image_model": context.get("gemini_image_model", ""),
+        "generated_image_prompt": context.get("generated_image_prompt", ""),
+        "topic_entity": manifest_entity(topic_entity) if isinstance(topic_entity, dict) else None,
+        "topic_image_path": str(topic_image_path) if isinstance(topic_image_path, Path) else "",
+        "companies": [
+            manifest_entity(company)
+            for company in context.get("companies", [])
+            if isinstance(company, dict)
+        ],
+        "ceos": [
+            manifest_entity(ceo)
+            for ceo in context.get("ceos", [])
+            if isinstance(ceo, dict)
+        ],
+    }
+
+
 def build_x_carousel(
     url: str,
     *,
@@ -748,7 +1627,8 @@ def build_x_carousel(
     total = len(posts) + 1
     slides: list[dict[str, object]] = []
     title_path = out_dir / "slide_01.png"
-    render_title_slide(posts[0], title_path, total, title)
+    title_context = build_title_enrichment(posts, title=title, out_dir=out_dir)
+    render_title_slide(posts[0], title_path, total, title, title_context)
     slides.append({"index": 1, "type": "title", "path": str(title_path), "source_url": posts[0]["url"]})
 
     for idx, post in enumerate(posts, start=2):
@@ -809,6 +1689,7 @@ def build_x_carousel(
         "source_url": url,
         "thread_post_count": len(posts),
         "slide_count": total,
+        "title_context": manifest_title_context(title_context),
         "slides": slides,
     }
     manifest_path = out_dir / "manifest.json"
@@ -818,6 +1699,7 @@ def build_x_carousel(
 
 
 def main() -> int:
+    load_env_file(ROOT / ".env")
     ap = argparse.ArgumentParser()
     ap.add_argument("url", help="X/Twitter status URL")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
