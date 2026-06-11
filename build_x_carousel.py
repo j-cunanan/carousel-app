@@ -649,7 +649,7 @@ def fetch_embed_post(url: str) -> dict[str, str] | None:
     print(f"[x] reading embed metadata {status_id}")
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            browser = p.chromium.launch(channel="chrome")
             page = browser.new_page(viewport={"width": 620, "height": 1600}, device_scale_factor=1)
             page.goto(embed_url, wait_until="networkidle")
             page.wait_for_timeout(1000)
@@ -784,7 +784,7 @@ def discover_thread_posts(url: str, max_posts: int, cookies_from_browser: str | 
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            browser = p.chromium.launch(channel="chrome")
             context = browser.new_context(
                 viewport={"width": 760, "height": 2200},
                 device_scale_factor=1,
@@ -908,7 +908,7 @@ def capture_embed(status_id: str, out_path: Path, *, width: int = 620) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"[x] capturing embed {status_id} -> {out_path.name}")
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(channel="chrome")
         page = browser.new_page(viewport={"width": width + 60, "height": 2400}, device_scale_factor=2)
         page.goto(url, wait_until="networkidle")
         page.wait_for_timeout(1500)
@@ -1565,7 +1565,7 @@ def render_html_slide(html_path: Path, out_path: Path) -> None:
     except ModuleNotFoundError as exc:
         raise SystemExit("playwright is required to render carousel slides") from exc
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(channel="chrome")
         page = browser.new_page(viewport={"width": SLIDE_W, "height": SLIDE_H}, device_scale_factor=1)
         page.goto(html_path.resolve().as_uri())
         page.wait_for_load_state("networkidle")
