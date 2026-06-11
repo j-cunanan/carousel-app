@@ -42,6 +42,7 @@ from generate_cover import DEFAULT_OPENAI_IMAGE_MODEL, generate_openai, openai_a
 ROOT = Path(__file__).resolve().parent
 FONTS = ROOT / "assets" / "archivo.css"
 DEFAULT_OUT = OUT / "x_carousel"
+DEFAULT_ACCOUNT_NAME = "LLMAW"
 
 X_COOKIE_DOMAINS = ("x.com", "twitter.com")
 GOOGLE_KG_ENDPOINT = "https://kgsearch.googleapis.com/v1/entities:search"
@@ -952,13 +953,13 @@ def title_from_post(post: dict[str, str]) -> tuple[str, str]:
 
 
 def title_font_size(text: str) -> int:
-    if len(text) > 95:
+    if len(text) > 110:
         return 58
-    if len(text) > 74:
+    if len(text) > 90:
         return 64
-    if len(text) > 52:
-        return 72
-    return 82
+    if len(text) > 64:
+        return 70
+    return 84
 
 
 def asset_uri(path: object) -> str:
@@ -1174,6 +1175,9 @@ def generate_openai_topic_image(
     path = generated_openai_image_path(out_dir, topic, prompt)
     model = openai_title_image_model()
     size = openai_title_image_size()
+    if path.exists():
+        print(f"[openai] using cached GPT Image title cover -> {path}")
+        return path, prompt
     try:
         generate_openai(prompt, path, model=model, size=size)
     except (SystemExit, Exception) as exc:
@@ -1344,20 +1348,6 @@ body {{ margin: 0; background: #555; font-family: 'Archivo', sans-serif; }}
   background: linear-gradient(180deg, var(--bg-top) 0%, #F1EEE6 48%, var(--bg) 100%);
   color: var(--fg);
 }}
-.handle {{
-  position: absolute;
-  top: 68px;
-  left: 78px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}}
-.handle span {{
-  font-size: 27px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}}
 .kicker {{
   position: absolute;
   top: 176px;
@@ -1384,44 +1374,23 @@ body {{ margin: 0; background: #555; font-family: 'Archivo', sans-serif; }}
 }}
 .dots {{
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 86px;
+  left: 56px;
+  right: 56px;
+  bottom: 72px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  font-size: 24px;
+  font-weight: 760;
+  letter-spacing: 0;
+  line-height: 1;
+  color: var(--primary);
 }}
-.dots .dash {{
-  width: 34px;
-  height: 9px;
-  border-radius: 5px;
-  background: var(--primary);
-}}
-.dots .dot {{
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: rgba(20, 18, 14, 0.28);
-}}
-"""
-
-
-def handle_markup() -> str:
-    return """
-  <div class="handle">
-    <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
-      <rect x="2" y="2" width="20" height="20" rx="5.5" fill="#16140F"/>
-      <circle cx="12" cy="12" r="4.4" stroke="#F4F2EC" stroke-width="1.8"/>
-      <circle cx="17.2" cy="6.8" r="1.3" fill="#F4F2EC"/>
-    </svg>
-    <span>@llmaw</span>
-  </div>
 """
 
 
 def dot_markup(active: int, count: int) -> str:
-    return "\n".join('<div class="dash"></div>' if i == active else '<div class="dot"></div>' for i in range(1, count + 1))
+    return '<span>swipe for more</span>' if active < count else ""
 
 
 def render_title_slide(
@@ -1430,33 +1399,32 @@ def render_title_slide(
     count: int,
     title: str | None,
     title_context: dict[str, object],
+    account_name: str,
 ) -> Path:
     headline, accent = title_from_post(post)
     if title:
         bits = title.rsplit(" ", 1)
         headline, accent = (bits[0], bits[1]) if len(bits) == 2 else (title, "")
-    source = f"{post.get('author', 'Source post')} {post.get('handle', '')}".strip()
     title_text = " ".join(part for part in (headline, accent) if part)
     font_size = title_font_size(title_text)
     html_path = out_path.with_suffix(".html")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     safe_headline = html.escape(headline)
     safe_accent = html.escape(accent)
-    safe_source = html.escape(source)
+    safe_account_name = html.escape(account_name.strip() or DEFAULT_ACCOUNT_NAME)
+    accent_markup = f' <span class="accent">{safe_accent}</span>' if safe_accent else ""
     visual = title_visual_markup(title_context)
     html_text = f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
 {shared_css()}
 .visual-card {{
   position: absolute;
-  top: 142px;
-  left: 78px;
-  width: 924px;
-  height: 500px;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 790px;
   overflow: hidden;
-  border-radius: 30px;
   background: #151713;
-  box-shadow: 0 34px 80px rgba(20, 18, 14, 0.22);
 }}
 .visual-bg, .visual-fallback {{
   position: absolute;
@@ -1468,6 +1436,15 @@ def render_title_slide(
   background-size: cover;
   filter: saturate(0.96) contrast(1.02);
 }}
+.visual-card::after {{
+  content: '';
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(244, 242, 236, 0) 42%, rgba(244, 242, 236, 0.24) 62%, var(--bg) 100%);
+  pointer-events: none;
+}}
 .visual-fallback {{
   z-index: 0;
   background:
@@ -1476,32 +1453,55 @@ def render_title_slide(
 }}
 .title-cluster {{
   position: absolute;
-  left: 104px;
-  right: 104px;
-  top: 708px;
-  text-align: center;
+  left: 56px;
+  right: 56px;
+  top: 742px;
+  bottom: 168px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  text-align: left;
+  z-index: 3;
+}}
+.account-rule {{
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin-bottom: 30px;
+  color: var(--primary);
+}}
+.account-rule::before,
+.account-rule::after {{
+  content: '';
+  flex: 1;
+  height: 2px;
+  background: var(--rule);
+}}
+.account-rule span {{
+  font-size: 24px;
+  font-weight: 820;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: uppercase;
+  color: var(--primary);
 }}
 .headline {{
   font-size: {font_size}px;
   font-weight: 850;
   letter-spacing: 0;
-  line-height: 1.05;
+  line-height: 1.03;
 }}
 .headline .accent {{ color: var(--primary); }}
-.source {{
-  margin-top: 28px;
-  font-size: 30px;
-  font-weight: 650;
-  color: var(--ink-soft);
+.dots {{
+  bottom: 116px;
 }}
 </style></head>
 <body>
 <div class="slide">
-{handle_markup()}
   {visual}
   <div class="title-cluster">
-    <h1 class="headline">{safe_headline}<br><span class="accent">{safe_accent}</span></h1>
-    <div class="source">{safe_source}</div>
+    <div class="account-rule"><span>{safe_account_name}</span></div>
+    <h1 class="headline">{safe_headline}{accent_markup}</h1>
   </div>
   <div class="dots">{dot_markup(1, count)}</div>
 </div>
@@ -1545,10 +1545,12 @@ def render_post_slide(post: dict[str, str], embed_png: Path, out_path: Path, act
   text-transform: uppercase;
   color: var(--primary);
 }}
+.dots {{
+  bottom: 62px;
+}}
 </style></head>
 <body>
 <div class="slide">
-{handle_markup()}
   <div class="shot-wrap"><img class="tweet-shot" src="{embed_png.resolve().as_uri()}"></div>
   <div class="source-label">{label}</div>
   <div class="dots">{dot_markup(active, count)}</div>
@@ -1628,12 +1630,15 @@ def build_x_carousel(
     out_dir: Path,
     max_thread_posts: int,
     title: str | None,
+    account_name: str,
     no_thread: bool,
+    first_page_only: bool,
     cookies_from_browser: str | None,
     thread_source: str = "auto",
 ) -> Path:
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    account_name = account_name.strip() or DEFAULT_ACCOUNT_NAME
     url = canonical_x_url(url)
     posts: list[dict[str, str]] = []
     used_thread_source = ""
@@ -1664,10 +1669,15 @@ def build_x_carousel(
     slides: list[dict[str, object]] = []
     title_path = out_dir / "slide_01.png"
     title_context = build_title_enrichment(posts, title=title, out_dir=out_dir)
-    render_title_slide(posts[0], title_path, total, title, title_context)
+    render_title_slide(posts[0], title_path, total, title, title_context, account_name)
     slides.append({"index": 1, "type": "title", "path": str(title_path), "source_url": posts[0]["url"]})
 
-    for idx, post in enumerate(posts, start=2):
+    if first_page_only:
+        posts_to_render: list[dict[str, str]] = []
+    else:
+        posts_to_render = posts
+
+    for idx, post in enumerate(posts_to_render, start=2):
         source_url = post["url"]
         metadata = fetch_metadata(source_url, cookies_from_browser)
         if metadata:
@@ -1726,6 +1736,9 @@ def build_x_carousel(
         "thread_source": used_thread_source,
         "thread_post_count": len(posts),
         "slide_count": total,
+        "rendered_slide_count": len(slides),
+        "first_page_only": first_page_only,
+        "account_name": account_name,
         "title_context": manifest_title_context(title_context),
         "slides": slides,
     }
@@ -1742,7 +1755,17 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--max-thread-posts", type=int, default=8)
     ap.add_argument("--title", help="Override generated title slide text")
+    ap.add_argument(
+        "--account-name",
+        default=os.environ.get("X_CAROUSEL_ACCOUNT_NAME", DEFAULT_ACCOUNT_NAME),
+        help="Account or publisher name displayed in the title slide template",
+    )
     ap.add_argument("--no-thread", action="store_true", help="Only build from the supplied post")
+    ap.add_argument(
+        "--first-page-only",
+        action="store_true",
+        help="Render only the title/cover page after metadata is fetched",
+    )
     ap.add_argument(
         "--thread-source",
         choices=("auto", "xai", "playwright"),
@@ -1771,7 +1794,9 @@ def main() -> int:
         out_dir=args.out_dir,
         max_thread_posts=args.max_thread_posts,
         title=args.title,
+        account_name=args.account_name,
         no_thread=args.no_thread,
+        first_page_only=args.first_page_only,
         cookies_from_browser=args.cookies_from_browser,
         thread_source=args.thread_source,
     )
