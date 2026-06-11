@@ -45,6 +45,10 @@ Generate LLMAW-branded cover art from a topic using GPT Image 2.0 or Grok Imagin
 # GPT Image 2.0 (default — uses OPENAI_API_KEY)
 uv run python generate_cover.py "Fable 5 changes everything"
 
+# Gemini Nano Banana models (uses GOOGLE_API_KEY or GEMINI_API_KEY)
+uv run python generate_cover.py "Fable 5 changes everything" --provider gemini --model nano-banana-pro
+uv run python generate_cover.py "Fable 5 changes everything" --provider gemini --model nano-banana-2
+
 # Grok Imagine (uses xAI OAuth or XAI_API_KEY)
 uv run python generate_cover.py "Why reasoning models win" --provider xai
 
