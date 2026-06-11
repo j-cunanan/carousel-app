@@ -36,6 +36,7 @@ from build_video_slide import (
     extract_status_url,
     format_post_date,
 )
+from fetch_tweet_data import fetch_thread, resolve_xai_token
 from generate_cover import DEFAULT_OPENAI_IMAGE_MODEL, generate_openai, openai_api_key
 
 ROOT = Path(__file__).resolve().parent
@@ -701,6 +702,56 @@ def article_to_post(article: dict[str, object]) -> dict[str, str] | None:
         "reposts": "",
         "replies": "",
     }
+
+
+def post_from_xai(data: dict[str, object]) -> dict[str, str] | None:
+    status_id = str(data.get("id") or "")
+    if not re.fullmatch(r"\d{10,}", status_id):
+        return None
+    text = clean_post_text(str(data.get("text") or ""))
+    if not text:
+        return None
+    url = str(data.get("url") or "")
+    if not url:
+        handle = str(data.get("handle") or "").lstrip("@") or "i"
+        url = f"https://x.com/{handle}/status/{status_id}"
+    return {
+        "url": canonical_x_url(url),
+        "id": status_id,
+        "author": str(data.get("author") or "Source post"),
+        "handle": str(data.get("handle") or ""),
+        "text": text,
+        "date": str(data.get("date") or ""),
+        "views": str(data.get("views_fmt") or ""),
+        "likes": str(data.get("likes_fmt") or ""),
+        "reposts": str(data.get("retweets_fmt") or ""),
+        "replies": str(data.get("replies_fmt") or ""),
+    }
+
+
+def discover_thread_posts_xai(url: str, max_posts: int) -> list[dict[str, str]]:
+    token = resolve_xai_token(required=False)
+    if not token:
+        return []
+    status_id = extract_status_id(url)
+    if not status_id:
+        return []
+    print("[x] fetching thread via xAI x_search")
+    try:
+        thread = fetch_thread(status_id, token, max_posts=max_posts)
+    except SystemExit as exc:
+        print(f"[x] xAI thread fetch failed ({exc}); trying Playwright discovery")
+        return []
+    except Exception as exc:
+        print(f"[x] xAI thread fetch error ({exc}); trying Playwright discovery")
+        return []
+
+    posts = [post for post in (post_from_xai(item) for item in thread) if post]
+    if not any(post["id"] == status_id for post in posts):
+        print("[x] xAI thread result did not include the requested post; ignoring it")
+        return []
+    print(f"[x] xAI found {len(posts)} thread post(s)")
+    return posts[:max_posts]
 
 
 def discover_thread_posts(url: str, max_posts: int, cookies_from_browser: str | None) -> list[dict[str, str]]:
@@ -1579,15 +1630,27 @@ def build_x_carousel(
     title: str | None,
     no_thread: bool,
     cookies_from_browser: str | None,
+    thread_source: str = "auto",
 ) -> Path:
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     url = canonical_x_url(url)
-    posts = [] if no_thread else discover_thread_posts(url, max_thread_posts, cookies_from_browser)
+    posts: list[dict[str, str]] = []
+    used_thread_source = ""
+    if not no_thread:
+        if thread_source in ("auto", "xai"):
+            posts = discover_thread_posts_xai(url, max_thread_posts)
+            if posts:
+                used_thread_source = "xai"
+        if not posts and thread_source in ("auto", "playwright"):
+            posts = discover_thread_posts(url, max_thread_posts, cookies_from_browser)
+            if posts:
+                used_thread_source = "playwright"
     if not posts:
         metadata = fetch_metadata(url, cookies_from_browser)
         embed_post = fetch_embed_post(url) if metadata is None else None
         posts = [embed_post or post_from_metadata(url, metadata)]
+        used_thread_source = "single-post"
 
     first_metadata = fetch_metadata(posts[0]["url"], cookies_from_browser)
     if first_metadata:
@@ -1660,6 +1723,7 @@ def build_x_carousel(
 
     manifest = {
         "source_url": url,
+        "thread_source": used_thread_source,
         "thread_post_count": len(posts),
         "slide_count": total,
         "title_context": manifest_title_context(title_context),
@@ -1680,6 +1744,16 @@ def main() -> int:
     ap.add_argument("--title", help="Override generated title slide text")
     ap.add_argument("--no-thread", action="store_true", help="Only build from the supplied post")
     ap.add_argument(
+        "--thread-source",
+        choices=("auto", "xai", "playwright"),
+        default=os.environ.get("X_THREAD_SOURCE", "auto"),
+        help=(
+            "Thread discovery backend: xAI x_search API, Playwright page scrape, "
+            "or auto (xAI when credentials exist, otherwise Playwright). "
+            "Also configurable with X_THREAD_SOURCE."
+        ),
+    )
+    ap.add_argument(
         "--cookies-from-browser",
         default=os.environ.get("X_COOKIES_FROM_BROWSER"),
         help=(
@@ -1699,6 +1773,7 @@ def main() -> int:
         title=args.title,
         no_thread=args.no_thread,
         cookies_from_browser=args.cookies_from_browser,
+        thread_source=args.thread_source,
     )
     return 0
 

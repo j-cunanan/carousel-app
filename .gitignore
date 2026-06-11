@@ -1,10 +1,12 @@
 .DS_Store
 .env
+story_sources.json
 .venv/
 __pycache__/
 *.pyc
 
 assets/video_sources/
+out/automation/
 out/_video_frame.html
 out/_build_*.html
 out/video_*.json

@@ -1,0 +1,32 @@
+{
+  "accounts": [
+    "OpenAI",
+    "AnthropicAI",
+    "GoogleDeepMind",
+    "MistralAI",
+    "sama"
+  ],
+  "lookback_hours": 24,
+  "max_posts_per_account": 5,
+  "min_score": 55,
+  "include_keywords": [
+    "agent",
+    "ai",
+    "benchmark",
+    "codex",
+    "deepfake",
+    "launch",
+    "model",
+    "open source",
+    "policy",
+    "research",
+    "safety"
+  ],
+  "exclude_keywords": [
+    "giveaway",
+    "hiring",
+    "join us",
+    "podcast",
+    "webinar"
+  ]
+}

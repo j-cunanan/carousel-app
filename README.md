@@ -67,12 +67,60 @@ The script reads `brand.json` for the LLMAW color palette (cream paper #F4F2EC, 
 Fetch structured tweet content + metadata via xAI Responses with X search instead of brittle Playwright screenshots:
 
 ```sh
-# Requires a Hermes xAI OAuth token (see one-time setup)
+# Auth: XAI_API_KEY env var (or .env), falling back to a Hermes xAI OAuth token
 uv run python fetch_tweet_data.py https://x.com/bcherny/status/2064431111154053187
 uv run python fetch_tweet_data.py 2064431111154053187 --out tweet.json
+
+# Fetch the complete same-author thread containing the tweet, in order
+uv run python fetch_tweet_data.py 2064431111154053187 --thread --max-posts 12
 ```
 
-Returns JSON with: id, text, author, handle, likes, retweets, replies, formatted counts, and URL.
+Returns JSON with: id, text, author, handle, date, likes, retweets, replies, views, has_video, formatted counts, and URL. With `--thread` it returns an ordered JSON array, first post to last, restricted to the thread author's own posts.
+
+### Thread source decision: xAI API first, Playwright as fallback
+
+The carousel pipeline previously discovered threads only by scrolling the live X page in Playwright. That breaks for anonymous browsers (X hides thread replies behind the login wall), requires `--cookies-from-browser`, and ships no engagement metrics for thread posts. The xAI `x_search` path has none of those problems and returns structured data, so it is now the preferred thread source whenever credentials exist (`XAI_API_KEY` or Hermes OAuth). Playwright remains in two roles:
+
+- **Fallback discovery** when no xAI credentials are configured.
+- **Rendering** — embedded-post screenshots and HTML→PNG slide capture are visual jobs the API cannot do; Playwright keeps them.
+
+The official X API was rejected: read access requires paid developer enrollment and offers no advantage over `x_search` for this workflow.
+
+## Human-in-the-loop Story Scout
+
+The automation front door is `story_scout.py`: it scans configured X accounts, scores high-signal posts, queues candidates for approval, and can hand approved posts into the existing one-URL carousel build.
+
+Create a local source list:
+
+```sh
+cp story_sources.example.json story_sources.json
+```
+
+Run a scan:
+
+```sh
+uv run python story_scout.py scan --config story_sources.json
+uv run python story_scout.py list
+```
+
+Approve and build a queued candidate:
+
+```sh
+uv run python story_scout.py approve x_abc123def0
+```
+
+The build writes to `out/automation/builds/<candidate_id>/` and records the manifest path in `out/automation/candidates.json`.
+
+Telegram approvals are optional. Configure a bot token and chat ID, then scan with notifications:
+
+```sh
+export TELEGRAM_BOT_TOKEN=123456:...
+export TELEGRAM_CHAT_ID=123456789
+uv run python story_scout.py scan --config story_sources.json --notify
+uv run python story_scout.py telegram-poll --watch
+```
+
+Telegram approval callbacks use the same build path as the CLI. The broader automation plan lives in `AUTOMATION_ROADMAP.md`.
 
 ## Static PNG/PPTX build
 
@@ -101,7 +149,7 @@ The script writes an ordered carousel folder to `out/x_carousel`:
 - `slide_02.mp4`: branded post+video slide when the post has video
 - `manifest.json`: ordered slide list and source URLs
 
-By default it tries to detect same-author thread posts from the X page and creates one post/media slide for each detected part. Use `--no-thread` to force a single-post carousel, `--max-thread-posts` to cap a long thread, or `--title` to override the generated title slide.
+By default it tries to detect same-author thread posts and creates one post/media slide for each detected part. Thread discovery uses the xAI `x_search` API when `XAI_API_KEY` or a Hermes OAuth token is configured, and falls back to scraping the live X page with Playwright otherwise; the manifest records which backend produced the posts in `thread_source`. Use `--thread-source xai|playwright|auto` (or `X_THREAD_SOURCE`) to pin a backend, `--no-thread` to force a single-post carousel, `--max-thread-posts` to cap a long thread, or `--title` to override the generated title slide.
 
 X sometimes hides thread replies from anonymous browsers. If a URL is part of a thread but only one post is visible, let the workflow use your logged-in browser cookies:
 

@@ -1,23 +1,52 @@
 #!/usr/bin/env python3
-"""Fetch tweet content + metadata via xAI Responses API (uses SuperGrok/X Premium+).
+"""Fetch tweet content + metadata via xAI Responses API with x_search.
 
-Uses your Hermes xAI OAuth token from ~/.hermes/auth.json — no API key,
-no X Developer enrollment needed. Calls xAI's Responses API with x_search.
+Auth resolution order:
+  1. XAI_API_KEY environment variable (also read from ./.env)
+  2. Hermes xAI OAuth token from ~/.hermes/auth.json (SuperGrok/X Premium+)
 
 Usage:
     uv run python fetch_tweet_data.py https://x.com/bcherny/status/2064431111154053187
     uv run python fetch_tweet_data.py 2064431111154053187 --out tweet.json
+    uv run python fetch_tweet_data.py <url-or-id> --thread --max-posts 12
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent
+XAI_RESPONSES_URL = "https://api.x.ai/v1/responses"
+DEFAULT_XAI_MODEL = "grok-4.3"
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith(("'", '"')):
+            quote = value[0]
+            end = value.find(quote, 1)
+            value = value[1:end] if end > 0 else value[1:]
+        else:
+            value = re.split(r"\s+#", value, 1)[0].strip()
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def extract_tweet_id(raw: str) -> str:
@@ -37,13 +66,16 @@ def compact_number(value: int | None) -> str:
     return str(value)
 
 
-def get_xai_token() -> str:
+def get_hermes_token() -> str:
     """Get newest xAI OAuth access token from Hermes auth.json credential pool."""
     auth_path = Path.home() / ".hermes" / "auth.json"
     if not auth_path.exists():
-        raise SystemExit("No Hermes auth.json found. Run: hermes auth add xai-oauth")
+        return ""
 
-    data = json.loads(auth_path.read_text())
+    try:
+        data = json.loads(auth_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ""
     pool = data.get("credential_pool", {})
 
     best_token = ""
@@ -56,43 +88,40 @@ def get_xai_token() -> str:
             best_token = token
             best_refresh = refresh
 
-    if not best_token:
-        raise SystemExit(
-            "No valid xAI OAuth token found. Run: hermes auth add xai-oauth"
-        )
-
     return best_token
 
 
-def fetch_tweet(tweet_id: str, token: str) -> dict[str, Any]:
-    """Fetch tweet via xAI Responses API with x_search tool."""
-    url = "https://api.x.ai/v1/responses"
+def resolve_xai_token(*, required: bool = True) -> str:
+    """XAI_API_KEY first, then the Hermes OAuth pool. Empty string when absent."""
+    token = os.environ.get("XAI_API_KEY", "").strip() or get_hermes_token()
+    if not token and required:
+        raise SystemExit(
+            "No xAI credentials found. Set XAI_API_KEY or run: hermes auth add xai-oauth"
+        )
+    return token
+
+
+def xai_model() -> str:
+    return os.environ.get("XAI_TWEET_MODEL") or DEFAULT_XAI_MODEL
+
+
+def xai_responses_text(prompt: str, token: str, *, timeout: int = 90) -> str:
+    """Call the xAI Responses API with x_search and return the output text."""
     payload = {
-        "model": "grok-4.3",
-        "input": (
-            f"Look up tweet {tweet_id} on X/Twitter. "
-            f"Return ONLY a raw JSON object (no markdown, no code fences) with these exact fields: "
-            f'"full_text": "the complete tweet text", '
-            f'"author_name": "display name", '
-            f'"handle": "@username", '
-            f'"likes": number, '
-            f'"retweets": number, '
-            f'"replies": number'
-        ),
+        "model": xai_model(),
+        "input": prompt,
         "tools": [{"type": "x_search"}],
     }
-
     req = urllib.request.Request(
-        url,
+        XAI_RESPONSES_URL,
         data=json.dumps(payload).encode(),
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
     )
-
     try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode() if e.fp else ""
@@ -100,7 +129,6 @@ def fetch_tweet(tweet_id: str, token: str) -> dict[str, Any]:
     except urllib.error.URLError as e:
         raise SystemExit(f"Network error: {e.reason}")
 
-    # Extract text from Responses API output
     text_content = ""
     for item in result.get("output", []):
         if item.get("type") == "message":
@@ -110,48 +138,167 @@ def fetch_tweet(tweet_id: str, token: str) -> dict[str, Any]:
 
     if not text_content:
         raise SystemExit("xAI returned no content")
+    return text_content
 
-    # Extract JSON from the response
-    json_match = re.search(r"\{[\s\S]*\}", text_content)
-    if not json_match:
-        raise SystemExit(f"Could not parse JSON from response:\n{text_content[:500]}")
 
-    data = json.loads(json_match.group(0))
+def extract_json_value(text: str, opener: str, closer: str) -> Any:
+    start = text.find(opener)
+    end = text.rfind(closer)
+    if start < 0 or end <= start:
+        raise SystemExit(f"Could not parse JSON from response:\n{text[:500]}")
+    return json.loads(text[start : end + 1])
 
-    author = data.get("author_name", "")
-    handle = data.get("handle", "").lstrip("@")
-    likes = data.get("likes", 0) or 0
-    retweets = data.get("retweets", 0) or 0
-    replies = data.get("replies", 0) or 0
 
+def normalize_post(data: dict[str, Any], fallback_id: str = "") -> dict[str, Any]:
+    """Map a raw model-returned post object to the stable output shape."""
+    tweet_id = str(data.get("id") or fallback_id).strip()
+    author = str(data.get("author_name") or data.get("author") or "").strip()
+    handle = str(data.get("handle") or "").strip().lstrip("@")
+
+    def count(key: str) -> int:
+        value = data.get(key)
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    likes = count("likes")
+    retweets = count("retweets")
+    replies = count("replies")
+    views = count("views")
     return {
         "id": tweet_id,
-        "text": data.get("full_text", data.get("text", "")),
+        "text": str(data.get("full_text") or data.get("text") or "").strip(),
         "author": author,
         "handle": f"@{handle}" if handle else "",
+        "date": str(data.get("date") or "").strip(),
         "likes": likes,
         "retweets": retweets,
         "replies": replies,
-        "url": f"https://x.com/{handle}/status/{tweet_id}" if handle else "",
+        "views": views,
+        "has_video": bool(data.get("has_video")),
+        "url": f"https://x.com/{handle}/status/{tweet_id}" if handle and tweet_id else "",
         "likes_fmt": compact_number(likes),
         "retweets_fmt": compact_number(retweets),
         "replies_fmt": compact_number(replies),
+        "views_fmt": compact_number(views) if views else "",
     }
 
 
+POST_FIELDS_SPEC = (
+    '"id": "tweet id as a string", '
+    '"full_text": "the complete tweet text", '
+    '"author_name": "display name", '
+    '"handle": "@username", '
+    '"date": "Mon D, YYYY", '
+    '"likes": number, '
+    '"retweets": number, '
+    '"replies": number, '
+    '"views": number, '
+    '"has_video": boolean (true only when the tweet itself contains a video)'
+)
+
+
+def fetch_tweet(tweet_id: str, token: str) -> dict[str, Any]:
+    """Fetch a single tweet via xAI Responses API with x_search."""
+    prompt = (
+        f"Look up tweet {tweet_id} on X/Twitter. "
+        f"Return ONLY a raw JSON object (no markdown, no code fences) "
+        f"with these exact fields: {POST_FIELDS_SPEC}"
+    )
+    text_content = xai_responses_text(prompt, token, timeout=45)
+    data = extract_json_value(text_content, "{", "}")
+    if not isinstance(data, dict):
+        raise SystemExit("xAI returned JSON that is not an object")
+    post = normalize_post(data, fallback_id=tweet_id)
+    post["id"] = post["id"] or tweet_id
+    return post
+
+
+def fetch_thread(tweet_id: str, token: str, *, max_posts: int = 25) -> list[dict[str, Any]]:
+    """Fetch every same-author post of the thread containing tweet_id, in order.
+
+    Returns at least one post (the target tweet) on success. Posts are sorted
+    by tweet id ascending, which is chronological for X snowflake ids.
+    """
+    prompt = (
+        f"Tweet {tweet_id} on X/Twitter may be part of a thread: a chain of "
+        f"consecutive posts where the SAME author replies to their own previous post. "
+        f"Find the complete thread it belongs to, from the first post of the thread "
+        f"to the last, including posts before and after tweet {tweet_id}. "
+        f"Include ONLY posts authored by the thread author replying to themselves; "
+        f"exclude replies from other accounts and exclude the author's replies to "
+        f"other people. If the tweet is not part of a thread, return just that tweet. "
+        f"Return ONLY a raw JSON array (no markdown, no code fences) ordered first "
+        f"post to last, where each element has these exact fields: {POST_FIELDS_SPEC}"
+    )
+    text_content = xai_responses_text(prompt, token, timeout=120)
+    data = extract_json_value(text_content, "[", "]")
+    if not isinstance(data, list):
+        raise SystemExit("xAI returned JSON that is not an array")
+
+    posts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        post = normalize_post(item)
+        if not re.fullmatch(r"\d{10,}", post["id"]) or post["id"] in seen:
+            continue
+        if not post["text"]:
+            continue
+        seen.add(post["id"])
+        posts.append(post)
+
+    posts.sort(key=lambda post: int(post["id"]))
+
+    # The thread must contain the requested tweet; otherwise trust nothing.
+    if not any(post["id"] == tweet_id for post in posts):
+        single = fetch_tweet(tweet_id, token)
+        return [single]
+
+    # Threads have one author: keep the target's handle only.
+    target = next(post for post in posts if post["id"] == tweet_id)
+    target_handle = target["handle"].lower()
+    if target_handle:
+        posts = [
+            post
+            for post in posts
+            if not post["handle"] or post["handle"].lower() == target_handle
+        ]
+
+    return posts[:max_posts]
+
+
 def main() -> int:
+    load_env_file(ROOT / ".env")
     ap = argparse.ArgumentParser(
         description="Fetch tweet content via xAI Responses API"
     )
     ap.add_argument("tweet", help="Tweet URL or ID")
     ap.add_argument("--out", "-o", type=Path, help="Save JSON to file instead of stdout")
+    ap.add_argument(
+        "--thread",
+        action="store_true",
+        help="Fetch the full same-author thread containing the tweet",
+    )
+    ap.add_argument(
+        "--max-posts",
+        type=int,
+        default=25,
+        help="Maximum thread posts to return (with --thread)",
+    )
     args = ap.parse_args()
 
     tweet_id = extract_tweet_id(args.tweet)
-    token = get_xai_token()
+    token = resolve_xai_token()
 
-    print(f"Fetching tweet {tweet_id} via xAI...", file=sys.stderr)
-    data = fetch_tweet(tweet_id, token)
+    if args.thread:
+        print(f"Fetching thread for tweet {tweet_id} via xAI...", file=sys.stderr)
+        data: Any = fetch_thread(tweet_id, token, max_posts=args.max_posts)
+    else:
+        print(f"Fetching tweet {tweet_id} via xAI...", file=sys.stderr)
+        data = fetch_tweet(tweet_id, token)
 
     output = json.dumps(data, indent=2, ensure_ascii=False)
     if args.out:
