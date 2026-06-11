@@ -1,0 +1,17 @@
+{
+  "source": "https://x.com/BasilTheGreat/status/2064642784947024365",
+  "source_video": "/Users/buloy/projects/carousel-app/assets/video_sources/twitter_2064642116974727168.mp4",
+  "frame": "out/deepfake_frame_03.png",
+  "video": "out/deepfake_03.mp4",
+  "poster": "out/deepfake_03_poster.png",
+  "layout": "video",
+  "post": null,
+  "size": "1080x1350",
+  "media_box": {
+    "x": 110,
+    "y": 300,
+    "width": 860,
+    "height": 760,
+    "fit": "contain"
+  }
+}
