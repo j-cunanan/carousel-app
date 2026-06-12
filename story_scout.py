@@ -376,7 +376,108 @@ def find_candidate(queue: dict[str, Any], cid: str) -> dict[str, Any]:
     raise SystemExit(f"No candidate found with id {cid}")
 
 
-def telegram_api(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+def extract_status_url(value: str) -> str:
+    match = re.search(
+        r"https://(?:www\.)?(?:x|twitter)\.com/[^\s<>()]+/status/\d+",
+        value,
+    )
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,;:)]}")
+
+
+def post_from_status_url(url: str, *, fallback_handle: str = "", fallback_text: str = "") -> dict[str, Any]:
+    match = re.search(r"https://(?:www\.)?(?:x|twitter)\.com/([^/]+)/status/(\d+)", url)
+    handle = normalize_handle(match.group(1)) if match else normalize_handle(fallback_handle)
+    tweet_id = match.group(2) if match else ""
+    return {
+        "id": tweet_id,
+        "text": fallback_text,
+        "author": "",
+        "handle": handle,
+        "date": "",
+        "likes": 0,
+        "retweets": 0,
+        "replies": 0,
+        "views": 0,
+        "has_video": False,
+        "url": url.replace("twitter.com", "x.com"),
+        "likes_fmt": "",
+        "retweets_fmt": "",
+        "replies_fmt": "",
+        "views_fmt": "",
+    }
+
+
+def recover_candidate_from_callback(
+    queue: dict[str, Any],
+    cid: str,
+    callback: dict[str, Any],
+) -> dict[str, Any] | None:
+    message = callback.get("message") if isinstance(callback.get("message"), dict) else {}
+    text = str(message.get("text") or message.get("caption") or "")
+    url = extract_status_url(text)
+    if not url:
+        return None
+
+    for candidate in queue.get("candidates", []):
+        post = candidate.get("post") if isinstance(candidate.get("post"), dict) else {}
+        if str(post.get("url") or "").replace("twitter.com", "x.com") == url.replace("twitter.com", "x.com"):
+            print(
+                f"[telegram] recovered missing callback id {cid} by matching URL to {candidate.get('id')}",
+                flush=True,
+            )
+            return candidate
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    score = 0
+    handle = ""
+    body_lines: list[str] = []
+    why = ""
+    for line in lines:
+        score_match = re.search(r"(\d+)\s+score\s+-\s+(@[A-Za-z0-9_]+)", line)
+        if score_match:
+            score = int(score_match.group(1))
+            handle = score_match.group(2)
+            continue
+        if line.startswith(("Carousel candidate", "Why:")):
+            if line.startswith("Why:"):
+                why = line.removeprefix("Why:").strip()
+            continue
+        if extract_status_url(line):
+            continue
+        body_lines.append(line)
+
+    post = post_from_status_url(
+        url,
+        fallback_handle=handle,
+        fallback_text=" ".join(body_lines).strip(),
+    )
+    if why:
+        post["why"] = why
+
+    now = utc_now()
+    candidate = {
+        "id": cid,
+        "status": "candidate",
+        "score": score,
+        "score_reasons": ["recovered from Telegram callback"],
+        "source_account": post.get("handle", ""),
+        "post": post,
+        "created_at": now,
+        "updated_at": now,
+        "recovered_from_telegram": True,
+        "telegram_message": {
+            "chat_id": (message.get("chat") or {}).get("id") if isinstance(message.get("chat"), dict) else None,
+            "message_id": message.get("message_id"),
+        },
+    }
+    queue.setdefault("candidates", []).append(candidate)
+    print(f"[telegram] recovered missing candidate {cid} from Telegram message URL {url}", flush=True)
+    return candidate
+
+
+def telegram_api(method: str, payload: dict[str, Any], *, timeout: int = 30) -> dict[str, Any]:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not configured")
@@ -390,7 +491,7 @@ def telegram_api(method: str, payload: dict[str, Any]) -> dict[str, Any]:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -450,8 +551,28 @@ def notify_telegram(candidate: dict[str, Any]) -> bool:
     return True
 
 
-def answer_callback(callback_id: str, text: str) -> None:
-    telegram_api("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
+def is_expired_callback_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "400" in message
+        and "query" in message
+        and (
+            "too old" in message
+            or "response timeout expired" in message
+            or "query id is invalid" in message
+        )
+    )
+
+
+def answer_callback(callback_id: str, text: str) -> bool:
+    try:
+        telegram_api("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
+    except SystemExit as exc:
+        if not is_expired_callback_error(exc):
+            raise
+        print("[telegram] callback acknowledgement expired; continuing")
+        return False
+    return True
 
 
 def build_candidate(
@@ -591,18 +712,32 @@ def load_telegram_state(path: Path) -> dict[str, Any]:
     return load_json_file(path, {"offset": 0})
 
 
+def reset_telegram_offset(path: Path) -> None:
+    write_json_file(path, {"offset": 0})
+    print(f"[telegram] reset update offset in {path}", flush=True)
+
+
 def process_telegram_updates(args: argparse.Namespace) -> int:
     queue = load_queue(args.queue)
     state = load_telegram_state(args.telegram_state)
+    if getattr(args, "reset_offset", False):
+        state["offset"] = 0
+        args.reset_offset = False
     payload = {
         "offset": int(state.get("offset") or 0),
         "timeout": args.timeout,
         "allowed_updates": ["callback_query"],
     }
-    result = telegram_api("getUpdates", payload)
+    print(
+        f"[telegram] polling offset={payload['offset']} timeout={args.timeout}s",
+        flush=True,
+    )
+    result = telegram_api("getUpdates", payload, timeout=max(30, args.timeout + 10))
     updates = result.get("result", [])
     processed = 0
+    ignored = 0
     rc = 0
+    print(f"[telegram] fetched {len(updates)} update(s)", flush=True)
     for update in updates:
         update_id = int(update.get("update_id") or 0)
         state["offset"] = max(int(state.get("offset") or 0), update_id + 1)
@@ -610,16 +745,38 @@ def process_telegram_updates(args: argparse.Namespace) -> int:
         data = str(callback.get("data") or "")
         callback_id = str(callback.get("id") or "")
         if ":" not in data:
+            ignored += 1
+            print(f"[telegram] ignored callback with unexpected data={data!r}", flush=True)
             continue
         action, cid = data.split(":", 1)
         try:
             candidate = find_candidate(queue, cid)
         except SystemExit:
-            if callback_id:
-                answer_callback(callback_id, "Candidate was not found")
-            continue
+            candidate = recover_candidate_from_callback(queue, cid, callback)
+            if not candidate:
+                ignored += 1
+                print(f"[telegram] ignored {action} for missing candidate {cid}", flush=True)
+                if callback_id:
+                    answer_callback(callback_id, "Candidate was not found")
+                continue
+        print(
+            f"[telegram] callback action={action} candidate={cid} status={candidate.get('status')}",
+            flush=True,
+        )
 
         if action == "reject":
+            if candidate.get("status") == "built":
+                ignored += 1
+                print(f"[telegram] ignored reject for already-built candidate {cid}", flush=True)
+                if callback_id:
+                    answer_callback(callback_id, "Already built; not rejected")
+                continue
+            if candidate.get("status") == "rejected":
+                ignored += 1
+                print(f"[telegram] ignored duplicate reject for {cid}", flush=True)
+                if callback_id:
+                    answer_callback(callback_id, "Already rejected")
+                continue
             candidate["status"] = "rejected"
             candidate["rejected_at"] = utc_now()
             candidate["updated_at"] = utc_now()
@@ -627,6 +784,12 @@ def process_telegram_updates(args: argparse.Namespace) -> int:
                 answer_callback(callback_id, "Rejected")
             processed += 1
         elif action == "approve_build":
+            if candidate.get("status") == "built":
+                ignored += 1
+                print(f"[telegram] ignored approve for already-built candidate {cid}", flush=True)
+                if callback_id:
+                    answer_callback(callback_id, "Already built")
+                continue
             candidate["status"] = "approved"
             candidate["approved_at"] = utc_now()
             candidate["updated_at"] = utc_now()
@@ -644,18 +807,26 @@ def process_telegram_updates(args: argparse.Namespace) -> int:
                     ),
                 )
             processed += 1
+        else:
+            ignored += 1
+            print(f"[telegram] ignored unknown callback action={action!r} candidate={cid}", flush=True)
     save_queue(args.queue, queue)
     write_json_file(args.telegram_state, state)
-    print(f"[telegram] processed {processed} callback(s)")
+    print(
+        f"[telegram] processed {processed} callback(s), ignored {ignored}; next offset={state.get('offset')}",
+        flush=True,
+    )
     return rc
 
 
 def telegram_poll_command(args: argparse.Namespace) -> int:
+    if args.reset_offset:
+        reset_telegram_offset(args.telegram_state)
     if not args.watch:
         return process_telegram_updates(args)
 
     rc = 0
-    print("[telegram] watching for approval callbacks")
+    print("[telegram] watching for approval callbacks", flush=True)
     while True:
         rc = max(rc, process_telegram_updates(args))
         time.sleep(args.interval)
@@ -715,6 +886,11 @@ def build_parser() -> argparse.ArgumentParser:
     telegram.add_argument("--timeout", type=int, default=5)
     telegram.add_argument("--interval", type=int, default=10)
     telegram.add_argument("--watch", action="store_true")
+    telegram.add_argument(
+        "--reset-offset",
+        action="store_true",
+        help="Forget the saved Telegram update offset and replay pending callbacks",
+    )
     telegram.add_argument("--no-run", dest="run", action="store_false", help="Approve without building")
     telegram.set_defaults(func=telegram_poll_command, run=True)
     add_common_build_args(telegram)
