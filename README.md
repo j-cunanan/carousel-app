@@ -192,6 +192,30 @@ For automation triggers that should still accept only the URL, set this once in 
 export X_COOKIES_FROM_BROWSER=chrome
 ```
 
+## One-URL Article Carousel
+
+Drop in a long-form article URL to turn only the highest-signal sections into
+LLMAW carousel pages:
+
+```sh
+uv run python build_article_carousel.py \
+  "https://venturebeat.com/technology/xiaomis-new-open-source-agentic-ai-coding-harness-mimo-code-beats-claude-code-at-ultra-long-200-step-tasks"
+```
+
+The script writes to `out/article_carousel`:
+
+- `slide_01.png`: branded title/hook slide, using the same cover system as the X workflow
+- `slide_02.png` and onward: selected article signal pages
+- `manifest.json`: ordered slide list, source article metadata, curation backend, and selected section scores
+- `source_article.json`: extracted blocks and candidate section scores for editorial review
+
+By default, curation uses Gemini when `GOOGLE_API_KEY` or `GEMINI_API_KEY` is
+available, and falls back to local scoring otherwise. Both paths filter for
+concrete facts such as benchmarks, releases, open-source details, technical
+claims, quantified comparisons, and strategic implications. Tune selection with
+`--max-pages`, `--min-score`, or force a backend with
+`--curation-backend gemini|local|auto`.
+
 ## Instagram Publishing
 
 `instagram_publish.py` publishes any generated carousel manifest through the Instagram Graph API. Instagram requires a professional Instagram account, an access token with content publishing permissions, and media files that Instagram can fetch from public HTTPS URLs. Local files and `localhost` URLs cannot be published directly.
