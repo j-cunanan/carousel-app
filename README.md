@@ -1,6 +1,6 @@
-# LLMAW Carousel Automation
+# vibecodersph Carousel Automation
 
-This repo renders LLMAW-branded carousel assets from HTML:
+This repo renders vibecodersph-branded carousel assets from HTML:
 
 - `out/slide_NN.png` for static carousel pages
 - `out/carousel.pptx` for Canva import
@@ -39,7 +39,7 @@ Generated title images are cached inside the generated output folder. Make sure 
 
 ## AI Cover Art
 
-Generate LLMAW-branded cover art from a topic using GPT Image 2.0 or Grok Imagine:
+Generate vibecodersph-branded cover art from a topic using GPT Image 2.0 or Grok Imagine:
 
 ```sh
 # GPT Image 2.0 (default — uses OPENAI_API_KEY)
@@ -60,7 +60,7 @@ uv run python generate_cover.py "topic" --prompt-only
 ```
 
 Styles: `abstract` (default), `typographic`, `minimal`, `illustrative`, `photo`.
-The script reads `brand.json` for the LLMAW color palette (cream paper #F4F2EC, dark ink #16140F, rust accent #C0552E) and builds a prompt that matches.
+The script reads `brand.json` for the vibecodersph color palette (cream paper #F4F2EC, dark ink #16140F, rust accent #C0552E) and builds a prompt that matches.
 
 ## Tweet Data via xAI
 
@@ -88,7 +88,7 @@ The official X API was rejected: read access requires paid developer enrollment 
 
 ## Human-in-the-loop Story Scout
 
-The automation front door is `story_scout.py`: it scans configured X accounts, scores high-signal posts, queues candidates for approval, and can hand approved posts into the existing one-URL carousel build.
+The automation front door is `story_scout.py`: it scans configured X accounts and article feeds, scores high-signal candidates, queues them for approval, and hands approved items into the matching one-URL carousel build.
 
 Create a local source list:
 
@@ -107,9 +107,10 @@ Approve and build a queued candidate:
 
 ```sh
 uv run python story_scout.py approve x_abc123def0
+uv run python story_scout.py approve article_abc123def0
 ```
 
-The build writes to `out/automation/builds/<candidate_id>/` and records the manifest path in `out/automation/candidates.json`.
+The build writes to `out/automation/builds/<candidate_id>/` and records the manifest path in `out/automation/candidates.json`. X candidates dispatch to `build_x_carousel.py`; article candidates dispatch to `build_article_carousel.py`. For article candidates, tune the build with `--article-max-pages`, `--article-min-score-build`, `--article-curation-backend`, or `--article-no-title-enrichment`.
 
 Preview the build-to-Instagram path after approval:
 
@@ -126,7 +127,7 @@ That uploads only the rendered carousel slides listed in `manifest.json`, then w
 uv run python story_scout.py approve x_abc123def0 \
   --publish-instagram \
   --instagram-upload-r2 \
-  --instagram-media-base-url "https://cdn.example.com/llmaw/x_abc123def0"
+  --instagram-media-base-url "https://cdn.example.com/vibecodersph/x_abc123def0"
 ```
 
 Prefer Buffer over the direct Meta API? `--publish-buffer` uploads the rendered slides to R2 and creates a Buffer draft on the connected Instagram channel:
@@ -195,7 +196,7 @@ export X_COOKIES_FROM_BROWSER=chrome
 ## One-URL Article Carousel
 
 Drop in a long-form article URL to turn only the highest-signal sections into
-LLMAW carousel pages:
+vibecodersph carousel pages:
 
 ```sh
 uv run python build_article_carousel.py \
@@ -216,6 +217,15 @@ claims, quantified comparisons, and strategic implications. Tune selection with
 `--max-pages`, `--min-score`, or force a backend with
 `--curation-backend gemini|local|auto`.
 
+Article feeds also run through the full automation queue. Add `article_sources`
+to `story_sources.json`, scan as usual, then approve the generated `article_*`
+candidate:
+
+```sh
+uv run python story_scout.py scan --config story_sources.json
+uv run python story_scout.py approve article_abc123def0 --article-curation-backend local
+```
+
 ## Instagram Publishing
 
 `instagram_publish.py` publishes any generated carousel manifest through the Instagram Graph API. Instagram requires a professional Instagram account, an access token with content publishing permissions, and media files that Instagram can fetch from public HTTPS URLs. Local files and `localhost` URLs cannot be published directly.
@@ -226,7 +236,7 @@ Configure credentials:
 export R2_ACCOUNT_ID=...
 export R2_ACCESS_KEY_ID=...
 export R2_SECRET_ACCESS_KEY=...
-export R2_BUCKET=llmaw-carousel-media
+export R2_BUCKET=vibecodersph-carousel-media
 export INSTAGRAM_USER_ID=178414...
 export INSTAGRAM_ACCESS_TOKEN=...
 export INSTAGRAM_GRAPH_DOMAIN=instagram
@@ -277,7 +287,7 @@ Use a local video:
 uv run python build_video_slide.py \
   --source assets/video_sources/example.mp4 \
   --source-label "SOURCE VIDEO" \
-  --caption "The source clip stays inside the LLMAW carousel frame."
+  --caption "The source clip stays inside the vibecodersph carousel frame."
 ```
 
 Use an X/Twitter embed snippet as the full post context plus the video:
@@ -334,7 +344,7 @@ uv run python build.py \
 
 Video outputs:
 
-- `out/video_frame_02.png`: the LLMAW frame used behind the clip
+- `out/video_frame_02.png`: the vibecodersph frame used behind the clip
 - `out/video_slide_02.mp4`: the carousel-ready MP4
 - `out/video_slide_02_poster.png`: first-frame poster for previews
 - `out/video_slide_02.json`: source and render manifest

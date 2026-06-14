@@ -2,7 +2,7 @@
 """Build a branded 1080x1350 MP4 carousel slide from a video source.
 
 The source can be a local video, a URL supported by yt-dlp, or pasted
-X/Twitter embed HTML. The result is an MP4 that uses the same LLMAW
+X/Twitter embed HTML. The result is an MP4 that uses the same vibecodersph
 carousel furniture as the static PNG slides.
 """
 from __future__ import annotations
@@ -302,7 +302,7 @@ def handle_markup() -> str:
       <circle cx="12" cy="12" r="4.4" stroke="#F4F2EC" stroke-width="1.8"/>
       <circle cx="17.2" cy="6.8" r="1.3" fill="#F4F2EC"/>
     </svg>
-    <span>@llmaw</span>
+    <span>@vibecodersph</span>
   </div>
 """
 
@@ -865,7 +865,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=OUT / "video_slide_02.mp4")
     ap.add_argument("--frame-out", type=Path, default=OUT / "video_frame_02.png")
     ap.add_argument("--poster-out", type=Path, default=OUT / "video_slide_02_poster.png")
-    ap.add_argument("--caption", default="A source video, framed inside the LLMAW carousel system.")
+    ap.add_argument("--caption", default="A source video, framed inside the vibecodersph carousel system.")
     ap.add_argument("--kicker", default="Video receipt")
     ap.add_argument("--source-label", default="")
     ap.add_argument("--active", type=int, default=2, help="Active dot index, 1-based")

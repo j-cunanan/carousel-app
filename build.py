@@ -89,7 +89,7 @@ def main() -> int:
     ap.add_argument("--video-out", type=Path, default=OUT / "video_slide_02.mp4")
     ap.add_argument("--video-frame-out", type=Path, default=OUT / "video_frame_02.png")
     ap.add_argument("--video-poster-out", type=Path, default=OUT / "video_slide_02_poster.png")
-    ap.add_argument("--video-caption", default="A source video, framed inside the LLMAW carousel system.")
+    ap.add_argument("--video-caption", default="A source video, framed inside the vibecodersph carousel system.")
     ap.add_argument("--video-kicker", default="Video receipt")
     ap.add_argument("--video-source-label", default="")
     ap.add_argument("--video-active", type=int, default=2, help="Active dot index for the MP4 slide")

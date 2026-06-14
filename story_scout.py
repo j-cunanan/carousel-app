@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find high-signal X posts, queue them for approval, and run approved builds.
+"""Find high-signal X posts and articles, queue them, and run approved builds.
 
 This is the human-in-the-loop front door for the carousel renderer:
 
@@ -22,7 +22,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,56 @@ DEFAULT_BUILDS_DIR = ROOT / "out" / "automation" / "builds"
 
 QUEUE_VERSION = 1
 SCOUT_USER_AGENT = "carousel-app/1.0 story-scout"
+ARTICLE_FEED_MAX_BYTES = 3_000_000
+ARTICLE_SIGNAL_TERMS = {
+    "agent",
+    "agentic",
+    "ai",
+    "alignment",
+    "benchmark",
+    "benchmarks",
+    "coding",
+    "context",
+    "eval",
+    "evaluation",
+    "frontier",
+    "github",
+    "inference",
+    "launch",
+    "launched",
+    "license",
+    "model",
+    "open source",
+    "open-source",
+    "paper",
+    "policy",
+    "pricing",
+    "reasoning",
+    "release",
+    "released",
+    "research",
+    "safety",
+    "score",
+    "swe-bench",
+    "tokens",
+    "tool",
+    "training",
+}
+ARTICLE_STRONG_TERMS = {
+    "benchmark",
+    "benchmarks",
+    "eval",
+    "github",
+    "license",
+    "open source",
+    "open-source",
+    "paper",
+    "pricing",
+    "released",
+    "research",
+    "score",
+    "swe-bench",
+}
 
 
 def utc_now() -> str:
@@ -60,6 +112,11 @@ def normalize_handle(value: str) -> str:
 def candidate_id(url: str) -> str:
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
     return f"x_{digest}"
+
+
+def article_candidate_id(url: str) -> str:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
+    return f"article_{digest}"
 
 
 def compact_text(value: str, limit: int = 180) -> str:
@@ -91,15 +148,22 @@ def load_config(path: Path) -> dict[str, Any]:
             f"Copy {example.name} to {path.name} and edit the account list."
         )
     config = load_json_file(path, {})
-    accounts = config.get("accounts")
-    if not isinstance(accounts, list) or not accounts:
-        raise SystemExit(f"{path} must contain a non-empty accounts array")
+    accounts = config.get("accounts") or []
+    if not isinstance(accounts, list):
+        raise SystemExit(f"{path} accounts must be an array when present")
     config["accounts"] = [slug_handle(str(account)) for account in accounts if slug_handle(str(account))]
-    if not config["accounts"]:
-        raise SystemExit(f"{path} must contain at least one usable account handle")
+    article_sources = normalize_article_sources(config.get("article_sources") or [])
+    config["article_sources"] = article_sources
+    if not config["accounts"] and not article_sources:
+        raise SystemExit(
+            f"{path} must contain at least one X account or article source"
+        )
     config["lookback_hours"] = int(config.get("lookback_hours") or 24)
+    config["article_lookback_hours"] = int(config.get("article_lookback_hours") or 72)
     config["max_posts_per_account"] = int(config.get("max_posts_per_account") or 5)
+    config["max_articles_per_source"] = int(config.get("max_articles_per_source") or 5)
     config["min_score"] = int(config.get("min_score") or 55)
+    config["article_min_score"] = int(config.get("article_min_score") or 45)
     config["include_keywords"] = [
         str(item).lower()
         for item in config.get("include_keywords", [])
@@ -111,6 +175,42 @@ def load_config(path: Path) -> dict[str, Any]:
         if str(item).strip()
     ]
     return config
+
+
+def normalize_article_sources(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise SystemExit("article_sources must be an array when present")
+    sources: list[dict[str, Any]] = []
+    for raw in value:
+        if isinstance(raw, str):
+            source = {"name": raw, "feed_url": raw}
+        elif isinstance(raw, dict):
+            source = dict(raw)
+        else:
+            continue
+        feed_url = str(source.get("feed_url") or "").strip()
+        urls = [
+            str(url).strip()
+            for url in source.get("urls", [])
+            if str(url).strip()
+        ] if isinstance(source.get("urls", []), list) else []
+        if not feed_url and not urls:
+            continue
+        source["feed_url"] = feed_url
+        source["urls"] = urls
+        source["name"] = str(source.get("name") or feed_url or "Article source").strip()
+        source["include_keywords"] = [
+            str(item).lower()
+            for item in source.get("include_keywords", [])
+            if str(item).strip()
+        ]
+        source["exclude_keywords"] = [
+            str(item).lower()
+            for item in source.get("exclude_keywords", [])
+            if str(item).strip()
+        ]
+        sources.append(source)
+    return sources
 
 
 def load_queue(path: Path) -> dict[str, Any]:
@@ -229,7 +329,7 @@ Search X/Twitter for recent original posts from these accounts:
 {handles}
 
 Find up to {limit} posts from the last {lookback} hours, with no more than {max_posts}
-posts per account. Prefer posts that would make strong LLMAW carousel source material:
+posts per account. Prefer posts that would make strong vibecodersph carousel source material:
 AI product launches, notable model/research releases, safety or policy shifts, strong
 technical claims, visible company/person announcements, controversies, benchmarks,
 major customer/adoption signals, and posts with unusually high engagement.
@@ -297,6 +397,274 @@ def fetch_scout_posts(config: dict[str, Any], *, limit: int) -> list[dict[str, A
     return posts
 
 
+def xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def find_child_text(parent: ET.Element, *names: str) -> str:
+    wanted = {name.lower() for name in names}
+    for child in list(parent):
+        if xml_local_name(child.tag) in wanted:
+            text = "".join(child.itertext())
+            return compact_whitespace(text)
+    return ""
+
+
+def find_atom_link(entry: ET.Element) -> str:
+    fallback = ""
+    for child in list(entry):
+        if xml_local_name(child.tag) != "link":
+            continue
+        href = str(child.attrib.get("href") or "").strip()
+        if not href:
+            continue
+        rel = str(child.attrib.get("rel") or "alternate").lower()
+        if rel == "alternate":
+            return href
+        fallback = fallback or href
+    return fallback
+
+
+def strip_html(value: str) -> str:
+    value = re.sub(r"(?is)<(script|style|svg)\b.*?</\1>", " ", value)
+    value = re.sub(r"(?i)<br\s*/?>", " ", value)
+    value = re.sub(r"<[^>]+>", " ", value)
+    return compact_whitespace(value)
+
+
+def compact_whitespace(value: str) -> str:
+    import html as html_module
+
+    value = html_module.unescape(value or "")
+    value = value.replace("\u00a0", " ")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def parse_feed_datetime(value: str) -> datetime | None:
+    value = compact_whitespace(value)
+    if not value:
+        return None
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def feed_item_datetime(item: dict[str, Any]) -> datetime | None:
+    return parse_feed_datetime(str(item.get("published_at") or ""))
+
+
+def fetch_url_text(url: str, *, timeout: int = 25, max_bytes: int = ARTICLE_FEED_MAX_BYTES) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": SCOUT_USER_AGENT,
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.8, */*;q=0.5",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise RuntimeError(f"response exceeded {max_bytes:,} bytes")
+            charset = response.headers.get_content_charset() or "utf-8"
+    except urllib.error.HTTPError as exc:
+        print(f"[article] feed HTTP {exc.code}: {url}", file=sys.stderr)
+        return ""
+    except (urllib.error.URLError, OSError, RuntimeError) as exc:
+        print(f"[article] feed fetch failed for {url}: {exc}", file=sys.stderr)
+        return ""
+    return raw.decode(charset, errors="replace")
+
+
+def parse_feed_entries(feed_xml: str, source: dict[str, Any]) -> list[dict[str, Any]]:
+    if not feed_xml.strip():
+        return []
+    try:
+        root = ET.fromstring(feed_xml)
+    except ET.ParseError as exc:
+        print(f"[article] could not parse feed {source.get('feed_url')}: {exc}", file=sys.stderr)
+        return []
+
+    source_name = str(source.get("name") or "Article source")
+    entries: list[dict[str, Any]] = []
+    items = root.findall(".//item")
+    if not items:
+        items = [
+            element
+            for element in root.iter()
+            if xml_local_name(element.tag) == "entry"
+        ]
+
+    for item in items:
+        is_atom = xml_local_name(item.tag) == "entry"
+        title = find_child_text(item, "title")
+        if is_atom:
+            url = find_atom_link(item)
+            summary = find_child_text(item, "summary", "content")
+            published = find_child_text(item, "published", "updated")
+        else:
+            url = find_child_text(item, "link") or find_child_text(item, "guid")
+            summary = find_child_text(item, "description", "summary", "encoded")
+            published = find_child_text(item, "pubDate", "published", "updated", "date")
+        url = url.strip()
+        if not title or not url.startswith(("http://", "https://")):
+            continue
+        entries.append(
+            {
+                "url": re.sub(r"#.*$", "", url),
+                "title": compact_whitespace(title),
+                "summary": strip_html(summary),
+                "source_name": source_name,
+                "feed_url": source.get("feed_url", ""),
+                "published_at": compact_whitespace(published),
+            }
+        )
+    return entries
+
+
+def article_keyword_lists(
+    source: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    include = list(config.get("include_keywords") or [])
+    include.extend(source.get("include_keywords") or [])
+    exclude = list(config.get("exclude_keywords") or [])
+    exclude.extend(source.get("exclude_keywords") or [])
+    return dedupe_lower(include), dedupe_lower(exclude)
+
+
+def dedupe_lower(values: list[str]) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        value = str(value).strip().lower()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        items.append(value)
+    return items
+
+
+def score_article_item(
+    item: dict[str, Any],
+    source: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[int, list[str]]:
+    reasons: list[str] = []
+    text = f"{item.get('title', '')} {item.get('summary', '')}".lower()
+    include_keywords, exclude_keywords = article_keyword_lists(source, config)
+
+    score = int(source.get("base_score") or 20)
+    matched = [keyword for keyword in include_keywords if keyword in text][:6]
+    if matched:
+        score += min(30, 5 * len(matched))
+        reasons.append("keywords: " + ", ".join(matched))
+
+    signal_hits = [term for term in ARTICLE_SIGNAL_TERMS if term in text]
+    if signal_hits:
+        score += min(18, 2 * len(signal_hits))
+        reasons.append("signal terms")
+
+    strong_hits = [term for term in ARTICLE_STRONG_TERMS if term in text]
+    if strong_hits:
+        score += min(18, 3 * len(strong_hits))
+        reasons.append("strong terms")
+
+    if re.search(r"\b\d+(?:\.\d+)?\s?(?:%(?!\w)|x\b|k\b|m\b|b\b|tokens?\b|parameters?\b|steps?\b|tasks?\b|calls?\b)", text, re.I):
+        score += 10
+        reasons.append("numbers")
+
+    if re.search(r"\b(?:beats?|versus|vs\.?|outperform|surpass|compare|leaderboard)\b", text):
+        score += 8
+        reasons.append("comparison")
+
+    excluded = [keyword for keyword in exclude_keywords if keyword in text]
+    if excluded:
+        score -= 35
+        reasons.append("excluded keyword: " + ", ".join(excluded[:3]))
+
+    published = feed_item_datetime(item)
+    if published:
+        age_hours = (datetime.now(timezone.utc) - published).total_seconds() / 3600
+        if age_hours <= 24:
+            score += 6
+            reasons.append("fresh")
+        elif age_hours <= 72:
+            score += 3
+
+    score = max(0, min(100, score))
+    if not reasons:
+        reasons.append("article source match")
+    return score, reasons
+
+
+def normalize_article_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "url": str(item.get("url") or "").strip(),
+        "title": compact_whitespace(str(item.get("title") or "")),
+        "summary": compact_text(strip_html(str(item.get("summary") or "")), 700),
+        "source_name": compact_whitespace(str(item.get("source_name") or "")),
+        "published_at": compact_whitespace(str(item.get("published_at") or "")),
+        "feed_url": str(item.get("feed_url") or "").strip(),
+    }
+
+
+def fetch_article_items(config: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    sources = config.get("article_sources") or []
+    if not sources:
+        return []
+
+    items: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    now = datetime.now(timezone.utc)
+    for source in sources:
+        source_items: list[dict[str, Any]] = []
+        feed_url = str(source.get("feed_url") or "")
+        if feed_url:
+            print(f"[article] scanning {source.get('name')}: {feed_url}")
+            source_items.extend(parse_feed_entries(fetch_url_text(feed_url), source))
+        for url in source.get("urls") or []:
+            source_items.append(
+                {
+                    "url": url,
+                    "title": url,
+                    "summary": "",
+                    "source_name": source.get("name") or "Article source",
+                    "feed_url": feed_url,
+                    "published_at": "",
+                }
+            )
+
+        lookback_hours = int(source.get("lookback_hours") or config.get("article_lookback_hours") or 72)
+        cutoff = now - timedelta(hours=lookback_hours)
+        per_source_limit = int(source.get("max_items") or config.get("max_articles_per_source") or 5)
+        kept_for_source = 0
+        for raw_item in source_items:
+            item = normalize_article_item(raw_item)
+            url = item["url"]
+            if not url or url in seen_urls:
+                continue
+            published = feed_item_datetime(item)
+            if published and published < cutoff:
+                continue
+            seen_urls.add(url)
+            item["_source_config"] = source
+            items.append(item)
+            kept_for_source += 1
+            if kept_for_source >= per_source_limit:
+                break
+            if len(items) >= limit:
+                return items
+    return items[:limit]
+
+
 def merge_candidates(
     queue: dict[str, Any],
     posts: list[dict[str, Any]],
@@ -318,6 +686,7 @@ def merge_candidates(
         candidate = {
             **previous,
             "id": cid,
+            "source_type": previous.get("source_type") or "x_post",
             "status": previous.get("status") or "candidate",
             "score": score,
             "score_reasons": reasons,
@@ -340,7 +709,73 @@ def merge_candidates(
     return discovered, queue["candidates"]
 
 
+def merge_article_candidates(
+    queue: dict[str, Any],
+    articles: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    min_score: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    existing_by_id = {
+        str(candidate.get("id")): candidate for candidate in queue.get("candidates", [])
+    }
+    now = utc_now()
+    discovered: list[dict[str, Any]] = []
+    for article in articles:
+        source_config = article.pop("_source_config", {}) if isinstance(article.get("_source_config"), dict) else {}
+        score, reasons = score_article_item(article, source_config, config)
+        if score < min_score:
+            continue
+        cid = article_candidate_id(str(article["url"]))
+        previous = existing_by_id.get(cid, {})
+        candidate = {
+            **previous,
+            "id": cid,
+            "source_type": "article",
+            "status": previous.get("status") or "candidate",
+            "score": score,
+            "score_reasons": reasons,
+            "source_account": article.get("source_name", ""),
+            "article": article,
+            "created_at": previous.get("created_at") or now,
+            "updated_at": now,
+        }
+        existing_by_id[cid] = candidate
+        discovered.append(candidate)
+
+    queue["candidates"] = sorted(
+        existing_by_id.values(),
+        key=lambda item: (
+            str(item.get("status") or ""),
+            -int(item.get("score") or 0),
+            str(item.get("created_at") or ""),
+        ),
+    )
+    return discovered, queue["candidates"]
+
+
+def candidate_source_type(candidate: dict[str, Any]) -> str:
+    source_type = str(candidate.get("source_type") or "")
+    if source_type:
+        return source_type
+    if isinstance(candidate.get("article"), dict):
+        return "article"
+    return "x_post"
+
+
 def format_candidate(candidate: dict[str, Any]) -> str:
+    if candidate_source_type(candidate) == "article":
+        article = candidate.get("article") or {}
+        reasons = "; ".join(candidate.get("score_reasons") or [])
+        source_name = article.get("source_name") or candidate.get("source_account") or "article"
+        return (
+            f"{candidate.get('id')} [{candidate.get('status')}] "
+            f"score={candidate.get('score')} ARTICLE {source_name}\n"
+            f"{compact_text(str(article.get('title') or ''), 240)}\n"
+            f"{article.get('url', '')}\n"
+            f"Why: {reasons}"
+        ).strip()
+
     post = candidate.get("post") or {}
     reasons = "; ".join(candidate.get("score_reasons") or [])
     return (
@@ -511,15 +946,26 @@ def notify_telegram(candidate: dict[str, Any]) -> bool:
     if candidate.get("telegram_notified_at"):
         return False
 
-    post = candidate.get("post") or {}
     reasons = "; ".join(candidate.get("score_reasons") or [])
+    if candidate_source_type(candidate) == "article":
+        article = candidate.get("article") or {}
+        headline = f"{candidate.get('score')} score - ARTICLE {article.get('source_name', '')}".strip()
+        body = compact_text(str(article.get("summary") or article.get("title") or ""), 700)
+        url = str(article.get("url") or "")
+        why = reasons
+    else:
+        post = candidate.get("post") or {}
+        headline = f"{candidate.get('score')} score - {post.get('handle', '')}"
+        body = compact_text(str(post.get("text") or ""), 700)
+        url = str(post.get("url") or "")
+        why = str(post.get("why") or reasons)
     text = "\n".join(
         [
             "Carousel candidate",
-            f"{candidate.get('score')} score - {post.get('handle', '')}",
-            compact_text(str(post.get("text") or ""), 700),
-            str(post.get("url") or ""),
-            f"Why: {post.get('why') or reasons}",
+            headline,
+            body,
+            url,
+            f"Why: {why}",
         ]
     )
     payload = {
@@ -593,30 +1039,58 @@ def build_candidate(
     buffer_dry_run: bool,
     buffer_upload_r2: bool,
     buffer_video_strategy: str,
+    article_max_pages: int,
+    article_min_score: int,
+    article_curation_backend: str,
+    article_no_title_enrichment: bool,
 ) -> int:
-    post = candidate.get("post") or {}
-    url = str(post.get("url") or "")
-    if not url:
-        raise SystemExit(f"Candidate {candidate.get('id')} has no post URL")
     out_dir = builds_dir / str(candidate["id"])
-    cmd = [
-        sys.executable,
-        str(ROOT / "build_x_carousel.py"),
-        url,
-        "--out-dir",
-        str(out_dir),
-        "--max-thread-posts",
-        str(max_thread_posts),
-        "--thread-source",
-        thread_source,
-    ]
-    if cookies_from_browser:
-        cmd.extend(["--cookies-from-browser", cookies_from_browser])
+    source_type = candidate_source_type(candidate)
+    if source_type == "article":
+        article = candidate.get("article") or {}
+        url = str(article.get("url") or "")
+        if not url:
+            raise SystemExit(f"Candidate {candidate.get('id')} has no article URL")
+        builder = "build_article_carousel.py"
+        cmd = [
+            sys.executable,
+            str(ROOT / builder),
+            url,
+            "--out-dir",
+            str(out_dir),
+            "--max-pages",
+            str(article_max_pages),
+            "--min-score",
+            str(article_min_score),
+            "--curation-backend",
+            article_curation_backend,
+        ]
+        if article_no_title_enrichment:
+            cmd.append("--no-title-enrichment")
+    else:
+        post = candidate.get("post") or {}
+        url = str(post.get("url") or "")
+        if not url:
+            raise SystemExit(f"Candidate {candidate.get('id')} has no post URL")
+        builder = "build_x_carousel.py"
+        cmd = [
+            sys.executable,
+            str(ROOT / builder),
+            url,
+            "--out-dir",
+            str(out_dir),
+            "--max-thread-posts",
+            str(max_thread_posts),
+            "--thread-source",
+            thread_source,
+        ]
+        if cookies_from_browser:
+            cmd.extend(["--cookies-from-browser", cookies_from_browser])
 
     candidate["status"] = "approved"
     candidate["build_started_at"] = utc_now()
     candidate["build_dir"] = str(out_dir)
-    print(f"[build] {candidate['id']} -> {out_dir}")
+    print(f"[build] {candidate['id']} -> {out_dir}", flush=True)
     result = subprocess.run(cmd, check=False)
     candidate["build_finished_at"] = utc_now()
     candidate["build_returncode"] = result.returncode
@@ -625,7 +1099,7 @@ def build_candidate(
         candidate["manifest_path"] = str(out_dir / "manifest.json")
     else:
         candidate["status"] = "failed"
-        candidate["failure"] = f"build_x_carousel.py exited {result.returncode}"
+        candidate["failure"] = f"{builder} exited {result.returncode}"
         return result.returncode
 
     rc = 0
@@ -738,9 +1212,25 @@ def publish_candidate_buffer(
 def scan_command(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     queue = load_queue(args.queue)
-    posts = fetch_scout_posts(config, limit=args.limit)
+    posts: list[dict[str, Any]] = []
+    if config.get("accounts"):
+        posts = fetch_scout_posts(config, limit=args.limit)
     min_score = args.min_score if args.min_score is not None else config["min_score"]
-    discovered, _ = merge_candidates(queue, posts, config, min_score=min_score)
+    discovered_posts, _ = merge_candidates(queue, posts, config, min_score=min_score)
+
+    articles = fetch_article_items(config, limit=args.article_limit)
+    article_min_score = (
+        args.article_min_score
+        if args.article_min_score is not None
+        else config["article_min_score"]
+    )
+    discovered_articles, _ = merge_article_candidates(
+        queue,
+        articles,
+        config,
+        min_score=article_min_score,
+    )
+    discovered = discovered_posts + discovered_articles
 
     notified = 0
     if args.notify:
@@ -751,7 +1241,10 @@ def scan_command(args: argparse.Namespace) -> int:
                 notified += 1
 
     save_queue(args.queue, queue)
-    print(f"[scan] {len(posts)} posts fetched; {len(discovered)} queued; {notified} notified")
+    print(
+        f"[scan] {len(posts)} posts fetched; {len(articles)} articles fetched; "
+        f"{len(discovered)} queued; {notified} notified"
+    )
     for candidate in discovered[: args.print_limit]:
         print()
         print(format_candidate(candidate))
@@ -790,6 +1283,10 @@ def build_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "buffer_dry_run": args.buffer_dry_run,
         "buffer_upload_r2": args.buffer_upload_r2,
         "buffer_video_strategy": args.buffer_video_strategy,
+        "article_max_pages": args.article_max_pages,
+        "article_min_score": args.article_min_score_build,
+        "article_curation_backend": args.article_curation_backend,
+        "article_no_title_enrichment": args.article_no_title_enrichment,
     }
 
 
@@ -1020,17 +1517,42 @@ def add_common_build_args(parser: argparse.ArgumentParser) -> None:
             "the video alone"
         ),
     )
+    parser.add_argument(
+        "--article-max-pages",
+        type=int,
+        default=6,
+        help="For article candidates, maximum article-section slides",
+    )
+    parser.add_argument(
+        "--article-min-score-build",
+        type=int,
+        default=6,
+        help="For article candidates, section signal threshold passed to build_article_carousel.py",
+    )
+    parser.add_argument(
+        "--article-curation-backend",
+        choices=("auto", "gemini", "local"),
+        default=os.environ.get("ARTICLE_CURATION_BACKEND", "auto"),
+        help="For article candidates, curation backend passed to build_article_carousel.py",
+    )
+    parser.add_argument(
+        "--article-no-title-enrichment",
+        action="store_true",
+        help="For article candidates, skip Gemini/OpenAI title enrichment",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Scout, approve, and build X carousel candidates")
+    parser = argparse.ArgumentParser(description="Scout, approve, and build carousel candidates")
     parser.add_argument("--queue", type=Path, default=DEFAULT_QUEUE)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    scan = sub.add_parser("scan", help="Scan configured X accounts for story candidates")
+    scan = sub.add_parser("scan", help="Scan configured X accounts and article feeds")
     scan.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     scan.add_argument("--limit", type=int, default=20)
+    scan.add_argument("--article-limit", type=int, default=20)
     scan.add_argument("--min-score", type=int)
+    scan.add_argument("--article-min-score", type=int)
     scan.add_argument("--notify", action="store_true", help="Send new candidates to Telegram")
     scan.add_argument("--print-limit", type=int, default=5)
     scan.set_defaults(func=scan_command)

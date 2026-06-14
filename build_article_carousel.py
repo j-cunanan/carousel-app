@@ -6,7 +6,7 @@ The workflow mirrors build_x_carousel.py, but the source is an article:
     uv run python build_article_carousel.py https://example.com/story
 
 Outputs go to out/article_carousel by default. The first slide is the same
-LLMAW title-cover style used by the X workflow. Remaining slides are selected
+vibecodersph title-cover style used by the X workflow. Remaining slides are selected
 from high-signal article sections only: concrete facts, benchmarks, launches,
 technical details, strategy shifts, and business implications.
 """
@@ -1078,6 +1078,7 @@ def render_article_slide(
         and heading_key
         and headline_key
         and heading_key != headline_key
+        and not heading_key.startswith(headline_key)
         and not heading_key.endswith(headline_key)
     )
     heading_markup = f'<div class="source-heading">{safe_heading}</div>' if show_heading else ""
@@ -1367,7 +1368,7 @@ def build_article_carousel(
 
 def main() -> int:
     load_env_file(ROOT / ".env")
-    ap = argparse.ArgumentParser(description="Build an LLMAW carousel from an article URL")
+    ap = argparse.ArgumentParser(description="Build a vibecodersph carousel from an article URL")
     ap.add_argument("source", help="Article URL, file:// URL, or local HTML file")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--max-pages", type=int, default=6, help="Maximum article-section slides")

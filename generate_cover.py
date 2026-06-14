@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate LLMAW-branded cover art for carousel slides.
+"""Generate vibecodersph-branded cover art for carousel slides.
 
 Supports two backends:
   1. OpenAI GPT Image 2.0 (default) — requires OPENAI_API_KEY
@@ -87,9 +87,9 @@ def load_brand() -> dict[str, Any]:
 
 
 def build_prompt(topic: str, style: str) -> str:
-    """Build an image generation prompt from topic + LLMAW brand.
+    """Build an image generation prompt from topic + vibecodersph brand.
 
-    The LLMAW aesthetic is "Whiteout / ink on light" — cream paper
+    The vibecodersph aesthetic is "Whiteout / ink on light" — cream paper
     background with dark ink typography and rust/terracotta accents.
     """
     brand = load_brand()
@@ -414,7 +414,7 @@ def generate_xai(prompt: str, out_path: Path) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Generate LLMAW-branded cover art for carousel slides"
+        description="Generate vibecodersph-branded cover art for carousel slides"
     )
     ap.add_argument("topic", help="The carousel topic/headline")
     ap.add_argument(

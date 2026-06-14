@@ -5,7 +5,7 @@
 Move the app from a one-URL carousel renderer to a mostly autonomous content system:
 
 1. Watch high-signal X accounts.
-2. Suggest only posts worth turning into LLMAW carousels.
+2. Suggest only posts worth turning into vibecodersph carousels.
 3. Ask for a quick human approval.
 4. Build the carousel automatically after approval.
 5. Publish the approved carousel to Instagram without manual asset handling.

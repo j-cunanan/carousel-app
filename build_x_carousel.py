@@ -42,7 +42,7 @@ from generate_cover import DEFAULT_OPENAI_IMAGE_MODEL, generate_openai, openai_a
 ROOT = Path(__file__).resolve().parent
 FONTS = ROOT / "assets" / "archivo.css"
 DEFAULT_OUT = OUT / "x_carousel"
-DEFAULT_ACCOUNT_NAME = "LLMAW"
+DEFAULT_ACCOUNT_NAME = "vibecodersph"
 PERSON_SOURCE_HANDLES = {
     "sama",
     "karpathy",

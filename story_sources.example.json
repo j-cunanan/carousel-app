@@ -7,26 +7,85 @@
     "sama"
   ],
   "lookback_hours": 24,
+  "article_lookback_hours": 96,
   "max_posts_per_account": 5,
+  "max_articles_per_source": 4,
   "min_score": 55,
+  "article_min_score": 45,
   "include_keywords": [
     "agent",
     "ai",
     "benchmark",
     "codex",
     "deepfake",
+    "eval",
+    "inference",
     "launch",
     "model",
     "open source",
     "policy",
     "research",
-    "safety"
+    "safety",
+    "swe-bench",
+    "tokens",
+    "tool calling"
   ],
   "exclude_keywords": [
     "giveaway",
     "hiring",
     "join us",
-    "podcast",
+    "sponsored",
     "webinar"
+  ],
+  "article_sources": [
+    {
+      "name": "OpenAI News",
+      "feed_url": "https://openai.com/news/rss.xml",
+      "base_score": 30,
+      "include_keywords": ["agent", "codex", "model", "research", "safety", "benchmark"]
+    },
+    {
+      "name": "Google AI Blog",
+      "feed_url": "https://blog.google/technology/ai/rss/",
+      "base_score": 25,
+      "include_keywords": ["gemini", "deepmind", "research", "model", "agent", "benchmark"]
+    },
+    {
+      "name": "Hugging Face Blog",
+      "feed_url": "https://huggingface.co/blog/feed.xml",
+      "base_score": 25,
+      "include_keywords": ["open source", "model", "dataset", "benchmark", "inference", "agents"]
+    },
+    {
+      "name": "The Decoder",
+      "feed_url": "https://the-decoder.com/feed/",
+      "base_score": 24,
+      "include_keywords": ["model", "benchmark", "open source", "agent", "research"]
+    },
+    {
+      "name": "TechCrunch AI",
+      "feed_url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+      "base_score": 18,
+      "include_keywords": ["launch", "model", "agent", "funding", "policy"],
+      "exclude_keywords": ["app update", "lawsuit recap"]
+    },
+    {
+      "name": "Simon Willison",
+      "feed_url": "https://simonwillison.net/atom/everything/",
+      "base_score": 28,
+      "include_keywords": ["llm", "agent", "prompt injection", "open source", "model", "security"]
+    },
+    {
+      "name": "Latent Space",
+      "feed_url": "https://www.latent.space/feed",
+      "base_score": 24,
+      "include_keywords": ["agent", "model", "research", "eval", "inference", "open source"]
+    },
+    {
+      "name": "Interconnects",
+      "feed_url": "https://www.interconnects.ai/feed",
+      "base_score": 26,
+      "include_keywords": ["open models", "post-training", "reasoning", "eval", "policy", "research"]
+    }
   ]
 }
